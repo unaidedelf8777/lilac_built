@@ -1,0 +1,127 @@
+[tool.poetry]
+name = "lilac"
+version = "0.0.1"
+description = "Index your dataset"
+authors = ["Lilac AI Inc. <info@lilacml.com>"]
+readme = "README.md"
+packages = [{include = "src"}]
+
+[tool.poetry.dependencies]
+cohere = "^3.7.0"
+datasets = "^2.9.0"
+duckdb = "^0.6.0"
+fastapi = "^0.92.0"
+google-cloud-storage = "^2.5.0"
+python = "~3.9"
+pyarrow = "^9.0.0"
+pydantic = "^1.10.2"
+pillow = "^9.3.0"
+requests = "^2.28.1"
+scikit-learn = "^1.2.1"
+tqdm = "^4.65.0"
+types-Pillow = "^9.3.0.4"
+typing-extensions = "^4.4.0"
+uvicorn = {extras = ["standard"], version = "^0.20.0"}
+##### Tensorflow #####
+# Install TF on all platforms but Macs with M1/M2 chips.
+tensorflow = {version = "~2.9", markers = "platform_machine != 'arm64'"}
+# Install special TF packages on Macs with M1/M2 chips.
+# https://developer.apple.com/metal/tensorflow-plugin/
+tensorflow-macos = {version = "~2.9.0", markers = "platform_machine == 'arm64'"}
+tensorflow-metal = {version = "^0.6.0", markers = "platform_machine == 'arm64'"}
+tensorflow-datasets = "^4.6.0"
+
+# Deps for development.
+[tool.poetry.group.dev]
+optional = true
+[tool.poetry.group.dev.dependencies]
+alembic = "^1.8.1"
+click = "^8.1.3"
+mypy = "^0.971"
+pytest = "^7.1.3"
+pytest-cov = "^4.0.0"
+pytest-mock = "^3.10.0"
+ruff = "^0.0.219"
+yapf = "^0.32.0"
+setuptools = "^65.5.0"
+wheel = "^0.37.1"
+google-api-python-client-stubs = "^1.13.0"
+types-requests = "^2.28.11.5"
+pytest-asyncio = "^0.20.2"
+types-tqdm = "^4.65.0.0"
+
+[tool.poetry.scripts]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pyright]
+include = ["src"]
+exclude = [
+  "**/__pycache__",
+]
+
+[tool.ruff]
+line-length = 100
+
+# Enable Pyflakes `F`, pycodestyle "W" and `E`, "Q" quotes, "I" imports.
+select = ["E", "W", "F", "Q", "I", "D"]
+ignore = [
+  "D105", # Missing docstring in magic method.
+  "D106", # Missing docstring in a public nested class.
+  "D107", # Missing docstring in __init__.
+  "D203", # 1 blank line required before class docstring.
+  "D204", # 1 blank line required after class docstring.
+  "D213", # Multi-line docstring summary should start at the second line.
+  "D407" # Missing dashed underline after section.
+]
+fix = true
+
+# Exclude a variety of commonly ignored directories.
+exclude = [
+    ".bzr",
+    ".direnv",
+    ".eggs",
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".nox",
+    ".pants.d",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    "__pypackages__",
+    "_build",
+    "buck-out",
+    "build",
+    "dist",
+    "node_modules",
+    "venv",
+]
+
+# Allow unused variables when underscore-prefixed.
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+# Assume Python 3.9.
+target-version = "py39"
+
+[tool.ruff.mccabe]
+# Unlike Flake8, default to a complexity level of 10.
+max-complexity = 10
+
+[tool.ruff.flake8-quotes]
+inline-quotes = "single"
+
+[tool.ruff.isort]
+force-wrap-aliases = true
+combine-as-imports = true
+
+[tool.ruff.per-file-ignores]
+"*_test.py" = ["D101", "D102", "D103", "D104"]
+"__init__.py" = ["D104"]
+
+[tool.ruff.pep8-naming]
+# Allow Pydantic's `@validator` decorator to trigger class method treatment.
+classmethod-decorators = ["classmethod", "pydantic.validator"]

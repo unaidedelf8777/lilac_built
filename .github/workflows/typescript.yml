@@ -1,0 +1,31 @@
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [16.x]
+
+    steps:
+      - uses: actions/checkout@v3
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            server/package-lock.json
+            web/package-lock.json
+      - name: Install dependencies
+        run: |
+          ./scripts/setup_ts.sh
+      - name: Lint and build typescript
+        run: |
+          ./scripts/lint_ts.sh
+      - name: 'Test typescript'
+        run: |
+          ./scripts/test_ts.sh

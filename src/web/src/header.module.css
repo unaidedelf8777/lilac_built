@@ -1,0 +1,9 @@
+.app_header {
+  height: 50px;
+}
+
+.app_header_title {
+  vertical-align: middle;
+  font-size: 20px;
+  padding: 10px 14px 12px;
+}
