@@ -19,8 +19,7 @@ class SelectRowsResult():
     self.rows = rows
 
   def __iter__(self) -> Iterator:
-    for row in self.rows:
-      yield row
+    return iter(self.rows)
 
 
 class Comparison(str, enum.Enum):
@@ -89,8 +88,14 @@ class DatasetManifest(BaseModel):
 def column_from_identifier(column: ColumnId) -> Column:
   """Create a column from a column identifier."""
   if isinstance(column, Column):
-    return column
-  return Column(feature=column)
+    result = column.copy()
+  else:
+    result = Column(feature=column)
+  # We normalize the feature to always be a path.
+  if isinstance(result.feature, (str, int)):
+    result.feature = (result.feature,)
+
+  return result
 
 
 class ConceptTransform(Transform):

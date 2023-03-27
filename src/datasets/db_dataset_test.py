@@ -1,15 +1,15 @@
-"""Tests implentations of db_dataset."""
+"""Implementation-agnostic tests of the Dataset DB API."""
 
 import pathlib
-from typing import Callable, Iterable, Optional, Type
+from typing import Iterable, Optional, Type
 
 import pytest
-from typing_extensions import override  # type: ignore
+from typing_extensions import override
 
-from ..embeddings.embedding_index import EmbeddingIndex, GetEmbeddingIndexFn
-from ..embeddings.embedding_registry import EmbeddingId
+from ..embeddings.embedding_index import GetEmbeddingIndexFn
 from ..schema import UUID_COLUMN, DataType, EnrichmentType, Field, Item, RichData, Schema
 from ..signals.signal import Signal
+from ..signals.signal_registry import clear_signal_registry, register_signal
 from ..signals.splitters.splitter import (
     TEXT_SPAN_END_FEATURE,
     TEXT_SPAN_FEATURE_NAME,
@@ -17,7 +17,7 @@ from ..signals.splitters.splitter import (
     SpanFields,
     SpanItem,
 )
-from .db_dataset import DatasetDB, DatasetManifest, SortOrder
+from .db_dataset import Column, DatasetDB, DatasetManifest, SortOrder
 from .db_dataset_duckdb import DatasetDuckDB
 from .db_dataset_test_utils import TEST_DATASET_NAME, TEST_NAMESPACE, make_db
 
@@ -55,7 +55,20 @@ SIMPLE_SCHEMA = Schema(
     })
 
 
-class TestSelectRows:
+@pytest.fixture(scope='module', autouse=True)
+def setup_teardown() -> Iterable[None]:
+  # Setup.
+  register_signal(TestSignal)
+  register_signal(TestSplitterWithLen)
+
+  # Unit test runs.
+  yield
+
+  # Teardown.
+  clear_signal_registry()
+
+
+class SelectRowsSuite:
 
   @pytest.mark.parametrize('db_cls', ALL_DBS)
   def test_default(self, tmp_path: pathlib.Path, db_cls: Type[DatasetDB]) -> None:
@@ -84,6 +97,208 @@ class TestSelectRows:
         'str': 'b',
         'float': 1.0
     }]
+
+  @pytest.mark.parametrize('db_cls', ALL_DBS)
+  def test_source_joined_with_signal_column(self, tmp_path: pathlib.Path,
+                                            db_cls: Type[DatasetDB]) -> None:
+    db = make_db(db_cls, tmp_path, SIMPLE_ITEMS, SIMPLE_SCHEMA)
+    test_signal = TestSignal()
+    db.compute_signal_column(signal=test_signal, column='str')
+
+    result = db.select_rows(columns=['str', 'str.test_signal'])
+
+    assert list(result) == [{
+        UUID_COLUMN: b'1' * 16,
+        'str': 'a',
+        'str.test_signal': {
+            'len': 1,
+            'flen': 1.0
+        }
+    }, {
+        UUID_COLUMN: b'2' * 16,
+        'str': 'b',
+        'str.test_signal': {
+            'len': 1,
+            'flen': 1.0
+        }
+    }, {
+        UUID_COLUMN: b'2' * 16,
+        'str': 'b',
+        'str.test_signal': {
+            'len': 1,
+            'flen': 1.0
+        }
+    }]
+
+    # Select a specific signal leaf test_signal.flen.
+    result = db.select_rows(columns=['str', ('str.test_signal', 'flen')])
+
+    assert list(result) == [{
+        UUID_COLUMN: b'1' * 16,
+        'str': 'a',
+        'str.test_signal.flen': 1.0
+    }, {
+        UUID_COLUMN: b'2' * 16,
+        'str': 'b',
+        'str.test_signal.flen': 1.0
+    }, {
+        UUID_COLUMN: b'2' * 16,
+        'str': 'b',
+        'str.test_signal.flen': 1.0
+    }]
+
+    # Select multiple signal leafs with aliasing.
+    result = db.select_rows(columns=[
+        'str',
+        Column(('str.test_signal', 'flen'), alias='flen'),
+        Column(('str.test_signal', 'len'), alias='len')
+    ])
+
+    assert list(result) == [{
+        UUID_COLUMN: b'1' * 16,
+        'str': 'a',
+        'flen': 1.0,
+        'len': 1
+    }, {
+        UUID_COLUMN: b'2' * 16,
+        'str': 'b',
+        'flen': 1.0,
+        'len': 1
+    }, {
+        UUID_COLUMN: b'2' * 16,
+        'str': 'b',
+        'flen': 1.0,
+        'len': 1
+    }]
+
+  @pytest.mark.parametrize('db_cls', ALL_DBS)
+  def test_signal_on_repeated_field(self, tmp_path: pathlib.Path, db_cls: Type[DatasetDB]) -> None:
+    db = make_db(db_cls,
+                 tmp_path,
+                 items=[{
+                     UUID_COLUMN: b'1' * 16,
+                     'text': ['hello', 'everybody'],
+                 }, {
+                     UUID_COLUMN: b'2' * 16,
+                     'text': ['hello2', 'everybody2'],
+                 }],
+                 schema=Schema(
+                     fields={
+                         UUID_COLUMN: Field(dtype=DataType.BINARY),
+                         'text': Field(repeated_field=Field(dtype=DataType.STRING)),
+                     }))
+    test_signal = TestSignal()
+    # Run the signal on the repeated field.
+    db.compute_signal_column(signal=test_signal, column=('text', '*'))
+
+    result = db.select_rows(columns=[('text.test_signal')])
+
+    assert list(result) == [{
+        UUID_COLUMN: b'1' * 16,
+        'text.test_signal': [{
+            'len': 5,
+            'flen': 5.0
+        }, {
+            'len': 9,
+            'flen': 9.0
+        }]
+    }, {
+        UUID_COLUMN: b'2' * 16,
+        'text.test_signal': [{
+            'len': 6,
+            'flen': 6.0
+        }, {
+            'len': 10,
+            'flen': 10.0
+        }]
+    }]
+
+  @pytest.mark.parametrize('db_cls', ALL_DBS)
+  def test_text_splitter(self, tmp_path: pathlib.Path, db_cls: Type[DatasetDB]) -> None:
+    db = make_db(db_cls=db_cls,
+                 tmp_path=tmp_path,
+                 items=[{
+                     UUID_COLUMN: b'1' * 16,
+                     'text': '[1, 1] first sentence. [1, 1] second sentence.',
+                 }, {
+                     UUID_COLUMN: b'2' * 16,
+                     'text': 'b2 [2, 1] first sentence. [2, 1] second sentence.',
+                 }],
+                 schema=Schema(fields={
+                     UUID_COLUMN: Field(dtype=DataType.BINARY),
+                     'text': Field(dtype=DataType.STRING),
+                 }))
+
+    db.compute_signal_column(signal=TestSplitterWithLen(), column='text')
+
+    result = db.select_rows(columns=['text', 'text.test_splitter'])
+    expected_result = [{
+        UUID_COLUMN: b'1' * 16,
+        'text': '[1, 1] first sentence. [1, 1] second sentence.',
+        'text.test_splitter': {
+            'sentences': [{
+                'len': 21,
+                TEXT_SPAN_FEATURE_NAME: {
+                    'start': 0,
+                    'end': 21
+                }
+            }, {
+                'len': 23,
+                TEXT_SPAN_FEATURE_NAME: {
+                    'start': 22,
+                    'end': 45
+                }
+            }]
+        }
+    }, {
+        UUID_COLUMN: b'2' * 16,
+        'text': 'b2 [2, 1] first sentence. [2, 1] second sentence.',
+        'text.test_splitter': {
+            'sentences': [{
+                'len': 24,
+                TEXT_SPAN_FEATURE_NAME: {
+                    'start': 0,
+                    'end': 24
+                }
+            }, {
+                'len': 23,
+                TEXT_SPAN_FEATURE_NAME: {
+                    'start': 25,
+                    'end': 48
+                }
+            }]
+        }
+    }]
+    assert list(result) == expected_result
+
+  @pytest.mark.parametrize('db_cls', ALL_DBS)
+  def test_invalid_column_paths(self, tmp_path: pathlib.Path, db_cls: Type[DatasetDB]) -> None:
+    db = make_db(db_cls,
+                 tmp_path,
+                 items=[{
+                     UUID_COLUMN: b'1' * 16,
+                     'text': 'hello',
+                     'text2': ['hello', 'world'],
+                 }, {
+                     UUID_COLUMN: b'2' * 16,
+                     'text': 'hello world',
+                     'text2': ['hello2', 'world2'],
+                 }],
+                 schema=Schema(
+                     fields={
+                         UUID_COLUMN: Field(dtype=DataType.BINARY),
+                         'text': Field(dtype=DataType.STRING),
+                         'text2': Field(repeated_field=Field(dtype=DataType.STRING)),
+                     }))
+    test_signal = TestSignal()
+    db.compute_signal_column(signal=test_signal, column='text')
+    db.compute_signal_column(signal=test_signal, column=('text2', '*'))
+
+    with pytest.raises(ValueError, match='Path part "invalid" not found in the dataset'):
+      db.select_rows(columns=[('text.test_signal', 'invalid')])
+
+    with pytest.raises(ValueError, match='Selecting a specific index of a repeated field'):
+      db.select_rows(columns=[('text2.test_signal', 4)])
 
   @pytest.mark.parametrize('db_cls', ALL_DBS)
   def test_sort(self, tmp_path: pathlib.Path, db_cls: Type[DatasetDB]) -> None:
@@ -169,16 +384,16 @@ class TestSplitterWithLen(Signal):
     }
 
   @override
-  def compute(
-      self,
-      data: Optional[Iterable[str]] = None,
-      keys: Optional[Iterable[bytes]] = None,
-      get_embedding_index: Optional[Callable[[EmbeddingId, Iterable[bytes]], EmbeddingIndex]] = None
-  ) -> Iterable[Item]:
+  def compute(self,
+              data: Optional[Iterable[RichData]] = None,
+              keys: Optional[Iterable[bytes]] = None,
+              get_embedding_index: Optional[GetEmbeddingIndexFn] = None) -> Iterable[Item]:
     if data is None:
       raise ValueError('Sentence splitter requires text data.')
 
     for text in data:
+      if not isinstance(text, str):
+        raise ValueError(f'Expected text to be a string, got {type(text)} instead.')
       sentences = text.split('.')
       yield {
           'sentences': [
@@ -206,7 +421,7 @@ class TestInvalidSignal(Signal):
     return []
 
 
-class TestComputeSignalItems:
+class ComputeSignalItemsSuite:
 
   @pytest.mark.parametrize('db_cls', ALL_DBS)
   def test_signal_output_validation(self, tmp_path: pathlib.Path, db_cls: Type[DatasetDB]) -> None:
@@ -277,7 +492,7 @@ class TestComputeSignalItems:
             }))
     assert dataset_manifest == expected_dataset_manifest
 
-    db.compute_signal_column(signal=test_signal, column='text2')
+    db.compute_signal_column(signal=test_signal, column=('text2', '*'))
 
     # Check the enriched dataset manifest has both enriched.
     dataset_manifest = db.manifest()
