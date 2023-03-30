@@ -41,8 +41,8 @@ from ..utils import (
 )
 from .dataset_utils import (
     create_enriched_schema,
+    default_top_level_signal_col_name,
     make_enriched_items,
-    top_level_signal_col_name,
 )
 from .db_dataset import (
     Column,
@@ -237,9 +237,9 @@ class DatasetDuckDB(DatasetDB):
                              signal_column_name: Optional[str] = None) -> str:
     column = column_from_identifier(column)
     if not signal_column_name:
-      signal_column_name = top_level_signal_col_name(signal, column)
+      signal_column_name = default_top_level_signal_col_name(signal, column)
 
-    signal_fields = signal.fields()
+    signal_field = signal.fields()
 
     if isinstance(column.feature, Column):
       raise ValueError(f'Cannot compute a signal for {column} as it is not a leaf feature.')
@@ -247,7 +247,7 @@ class DatasetDuckDB(DatasetDB):
     source_path = normalize_path(column.feature)
     signal_schema = create_enriched_schema(source_schema=self.manifest().data_schema,
                                            enrich_path=source_path,
-                                           enrich_fields=signal_fields)
+                                           enrich_field=signal_field)
 
     if signal.embedding_based:
       # For embedding based signals, get the leaf keys and indices, creating a combined key for the

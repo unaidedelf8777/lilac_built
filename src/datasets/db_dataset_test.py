@@ -10,7 +10,7 @@ from typing_extensions import override
 
 from ..embeddings.embedding_index import GetEmbeddingIndexFn
 from ..embeddings.embedding_registry import clear_embedding_registry, register_embed_fn
-from ..schema import UUID_COLUMN, DataType, EnrichmentType, Field, Item, RichData, Schema
+from ..schema import UUID_COLUMN, DataType, EnrichmentType, Field, Item, ItemValue, RichData, Schema
 from ..signals.signal import Signal
 from ..signals.signal_registry import clear_signal_registry, register_signal
 from ..signals.splitters.splitter import (
@@ -145,26 +145,26 @@ class SelectRowsSuite:
     test_signal = TestSignal()
     db.compute_signal_columns(signal=test_signal, column='str')
 
-    result = db.select_rows(columns=['str', 'str(test_signal)'])
+    result = db.select_rows(columns=['str', 'test_signal(str)'])
 
     assert list(result) == [{
         UUID_COLUMN: b'1' * 16,
         'str': 'a',
-        'str(test_signal)': {
+        'test_signal(str)': {
             'len': 1,
             'flen': 1.0
         }
     }, {
         UUID_COLUMN: b'2' * 16,
         'str': 'b',
-        'str(test_signal)': {
+        'test_signal(str)': {
             'len': 1,
             'flen': 1.0
         }
     }, {
         UUID_COLUMN: b'2' * 16,
         'str': 'b',
-        'str(test_signal)': {
+        'test_signal(str)': {
             'len': 1,
             'flen': 1.0
         }
@@ -185,7 +185,7 @@ class SelectRowsSuite:
                                                         Field(dtype=DataType.BOOLEAN),
                                                     'float':
                                                         Field(dtype=DataType.FLOAT64),
-                                                    'str(test_signal)':
+                                                    'test_signal(str)':
                                                         Field(fields={
                                                             'len': Field(dtype=DataType.INT32),
                                                             'flen': Field(dtype=DataType.FLOAT32)
@@ -194,27 +194,27 @@ class SelectRowsSuite:
                                                 }))
 
     # Select a specific signal leaf test_signal.flen.
-    result = db.select_rows(columns=['str', ('str(test_signal)', 'flen')])
+    result = db.select_rows(columns=['str', ('test_signal(str)', 'flen')])
 
     assert list(result) == [{
         UUID_COLUMN: b'1' * 16,
         'str': 'a',
-        'str(test_signal).flen': 1.0
+        'test_signal(str).flen': 1.0
     }, {
         UUID_COLUMN: b'2' * 16,
         'str': 'b',
-        'str(test_signal).flen': 1.0
+        'test_signal(str).flen': 1.0
     }, {
         UUID_COLUMN: b'2' * 16,
         'str': 'b',
-        'str(test_signal).flen': 1.0
+        'test_signal(str).flen': 1.0
     }]
 
     # Select multiple signal leafs with aliasing.
     result = db.select_rows(columns=[
         'str',
-        Column(('str(test_signal)', 'flen'), alias='flen'),
-        Column(('str(test_signal)', 'len'), alias='len')
+        Column(('test_signal(str)', 'flen'), alias='flen'),
+        Column(('test_signal(str)', 'len'), alias='len')
     ])
 
     assert list(result) == [{
@@ -263,7 +263,7 @@ class SelectRowsSuite:
                     Field(dtype=DataType.BINARY),
                 'text':
                     Field(repeated_field=Field(dtype=DataType.STRING)),
-                'text(test_signal)':
+                'test_signal(text)':
                     Field(repeated_field=Field(fields={
                         'len': Field(dtype=DataType.INT32),
                         'flen': Field(dtype=DataType.FLOAT32)
@@ -272,11 +272,11 @@ class SelectRowsSuite:
                           enriched=True)
             }))
 
-    result = db.select_rows(columns=[('text(test_signal)')])
+    result = db.select_rows(columns=[('test_signal(text)')])
 
     assert list(result) == [{
         UUID_COLUMN: b'1' * 16,
-        'text(test_signal)': [{
+        'test_signal(text)': [{
             'len': 5,
             'flen': 5.0
         }, {
@@ -285,7 +285,7 @@ class SelectRowsSuite:
         }]
     }, {
         UUID_COLUMN: b'2' * 16,
-        'text(test_signal)': [{
+        'test_signal(text)': [{
             'len': 6,
             'flen': 6.0
         }, {
@@ -378,43 +378,43 @@ class SelectRowsSuite:
 
     db.compute_signal_columns(signal=TestSplitterWithLen(), column='text')
 
-    result = db.select_rows(columns=['text', 'text(test_splitter)'])
+    result = db.select_rows(columns=['text', 'test_splitter(text)'])
     expected_result = [{
-        UUID_COLUMN: b'1' * 16,
-        'text': '[1, 1] first sentence. [1, 1] second sentence.',
-        'text(test_splitter)': {
-            'sentences': [{
-                'len': 22,
-                TEXT_SPAN_FEATURE_NAME: {
-                    TEXT_SPAN_START_FEATURE: 0,
-                    TEXT_SPAN_END_FEATURE: 22
-                }
-            }, {
-                'len': 23,
-                TEXT_SPAN_FEATURE_NAME: {
-                    TEXT_SPAN_START_FEATURE: 23,
-                    TEXT_SPAN_END_FEATURE: 46
-                }
-            }]
-        }
+        UUID_COLUMN:
+            b'1' * 16,
+        'text':
+            '[1, 1] first sentence. [1, 1] second sentence.',
+        'test_splitter(text)': [{
+            'len': 22,
+            TEXT_SPAN_FEATURE_NAME: {
+                TEXT_SPAN_START_FEATURE: 0,
+                TEXT_SPAN_END_FEATURE: 22
+            }
+        }, {
+            'len': 23,
+            TEXT_SPAN_FEATURE_NAME: {
+                TEXT_SPAN_START_FEATURE: 23,
+                TEXT_SPAN_END_FEATURE: 46
+            }
+        }]
     }, {
-        UUID_COLUMN: b'2' * 16,
-        'text': 'b2 [2, 1] first sentence. [2, 1] second sentence.',
-        'text(test_splitter)': {
-            'sentences': [{
-                'len': 25,
-                TEXT_SPAN_FEATURE_NAME: {
-                    TEXT_SPAN_START_FEATURE: 0,
-                    TEXT_SPAN_END_FEATURE: 25
-                }
-            }, {
-                'len': 23,
-                TEXT_SPAN_FEATURE_NAME: {
-                    TEXT_SPAN_START_FEATURE: 26,
-                    TEXT_SPAN_END_FEATURE: 49
-                }
-            }]
-        }
+        UUID_COLUMN:
+            b'2' * 16,
+        'text':
+            'b2 [2, 1] first sentence. [2, 1] second sentence.',
+        'test_splitter(text)': [{
+            'len': 25,
+            TEXT_SPAN_FEATURE_NAME: {
+                TEXT_SPAN_START_FEATURE: 0,
+                TEXT_SPAN_END_FEATURE: 25
+            }
+        }, {
+            'len': 23,
+            TEXT_SPAN_FEATURE_NAME: {
+                TEXT_SPAN_START_FEATURE: 26,
+                TEXT_SPAN_END_FEATURE: 49
+            }
+        }]
     }]
     assert list(result) == expected_result
 
@@ -446,22 +446,18 @@ class SelectRowsSuite:
             fields={
                 UUID_COLUMN: Field(dtype=DataType.BINARY),
                 'text': Field(dtype=DataType.STRING),
-                'text_emb_sum': Field(fields={'sum': Field(dtype=DataType.FLOAT32)}, enriched=True),
+                'text_emb_sum': Field(dtype=DataType.FLOAT32, enriched=True)
             }))
 
     result = db.select_rows(columns=['text', 'text_emb_sum'])
     expected_result = [{
         UUID_COLUMN: b'1' * 16,
         'text': 'hello.',
-        'text_emb_sum': {
-            'sum': 1.0
-        }
+        'text_emb_sum': 1.0
     }, {
         UUID_COLUMN: b'2' * 16,
         'text': 'hello2.',
-        'text_emb_sum': {
-            'sum': 2.0
-        }
+        'text_emb_sum': 2.0
     }]
     assert list(result) == expected_result
 
@@ -485,10 +481,10 @@ class SelectRowsSuite:
                               signal_column_name='text_sentences')
 
     db.compute_embedding_index(embedding=TEST_EMBEDDING_NAME,
-                               column=('text_sentences', 'sentences', '*', TEXT_SPAN_FEATURE_NAME))
+                               column=('text_sentences', '*', TEXT_SPAN_FEATURE_NAME))
 
     db.compute_signal_columns(signal=TestEmbeddingSumSignal(embedding=TEST_EMBEDDING_NAME),
-                              column=('text_sentences', 'sentences', '*', TEXT_SPAN_FEATURE_NAME),
+                              column=('text_sentences', '*', TEXT_SPAN_FEATURE_NAME),
                               signal_column_name='text_sentences_emb_sum')
 
     assert db.manifest() == DatasetManifest(
@@ -501,35 +497,21 @@ class SelectRowsSuite:
                 'text':
                     Field(dtype=DataType.STRING),
                 'text_sentences_emb_sum':
-                    Field(
-                        fields={
-                            'sentences':
-                                Field(repeated_field=Field(
-                                    fields={
-                                        TEXT_SPAN_FEATURE_NAME:
-                                            Field(fields={
-                                                'sum': Field(dtype=DataType.FLOAT32),
-                                            },
-                                                  enriched=True)
-                                    }))
-                        }),
+                    Field(repeated_field=Field(fields={
+                        TEXT_SPAN_FEATURE_NAME: Field(dtype=DataType.FLOAT32, enriched=True)
+                    })),
                 'text_sentences':
-                    Field(fields={
-                        'sentences':
-                            Field(repeated_field=Field(
-                                fields={
-                                    'len':
-                                        Field(dtype=DataType.INT32),
-                                    TEXT_SPAN_FEATURE_NAME:
-                                        Field(
-                                            fields={
-                                                TEXT_SPAN_START_FEATURE:
-                                                    Field(dtype=DataType.INT32),
-                                                TEXT_SPAN_END_FEATURE:
-                                                    Field(dtype=DataType.INT32)
-                                            })
-                                }))
-                    },
+                    Field(repeated_field=Field(
+                        fields={
+                            'len':
+                                Field(dtype=DataType.INT32),
+                            TEXT_SPAN_FEATURE_NAME:
+                                Field(
+                                    fields={
+                                        TEXT_SPAN_START_FEATURE: Field(dtype=DataType.INT32),
+                                        TEXT_SPAN_END_FEATURE: Field(dtype=DataType.INT32)
+                                    })
+                        }),
                           enriched=True)
             }))
 
@@ -537,61 +519,45 @@ class SelectRowsSuite:
     expected_result = [{
         UUID_COLUMN: b'1' * 16,
         'text': 'hello. hello2.',
-        'text_sentences': {
-            'sentences': [{
-                TEXT_SPAN_FEATURE_NAME: {
-                    TEXT_SPAN_START_FEATURE: 0,
-                    TEXT_SPAN_END_FEATURE: 6,
-                },
-                'len': 6
-            }, {
-                TEXT_SPAN_FEATURE_NAME: {
-                    TEXT_SPAN_START_FEATURE: 7,
-                    TEXT_SPAN_END_FEATURE: 14
-                },
-                'len': 7
-            }]
-        },
-        'text_sentences_emb_sum': {
-            'sentences': [{
-                TEXT_SPAN_FEATURE_NAME: {
-                    'sum': 1.0
-                }
-            }, {
-                TEXT_SPAN_FEATURE_NAME: {
-                    'sum': 2.0
-                }
-            }]
-        }
+        'text_sentences': [{
+            TEXT_SPAN_FEATURE_NAME: {
+                TEXT_SPAN_START_FEATURE: 0,
+                TEXT_SPAN_END_FEATURE: 6,
+            },
+            'len': 6
+        }, {
+            TEXT_SPAN_FEATURE_NAME: {
+                TEXT_SPAN_START_FEATURE: 7,
+                TEXT_SPAN_END_FEATURE: 14
+            },
+            'len': 7
+        }],
+        'text_sentences_emb_sum': [{
+            TEXT_SPAN_FEATURE_NAME: 1.0
+        }, {
+            TEXT_SPAN_FEATURE_NAME: 2.0
+        }]
     }, {
         UUID_COLUMN: b'2' * 16,
         'text': 'hello world. hello world2.',
-        'text_sentences': {
-            'sentences': [{
-                TEXT_SPAN_FEATURE_NAME: {
-                    TEXT_SPAN_START_FEATURE: 0,
-                    TEXT_SPAN_END_FEATURE: 12
-                },
-                'len': 12
-            }, {
-                TEXT_SPAN_FEATURE_NAME: {
-                    TEXT_SPAN_START_FEATURE: 13,
-                    TEXT_SPAN_END_FEATURE: 26
-                },
-                'len': 13
-            }]
-        },
-        'text_sentences_emb_sum': {
-            'sentences': [{
-                TEXT_SPAN_FEATURE_NAME: {
-                    'sum': 3.0
-                }
-            }, {
-                TEXT_SPAN_FEATURE_NAME: {
-                    'sum': 4.0
-                }
-            }]
-        }
+        'text_sentences': [{
+            TEXT_SPAN_FEATURE_NAME: {
+                TEXT_SPAN_START_FEATURE: 0,
+                TEXT_SPAN_END_FEATURE: 12
+            },
+            'len': 12
+        }, {
+            TEXT_SPAN_FEATURE_NAME: {
+                TEXT_SPAN_START_FEATURE: 13,
+                TEXT_SPAN_END_FEATURE: 26
+            },
+            'len': 13
+        }],
+        'text_sentences_emb_sum': [{
+            TEXT_SPAN_FEATURE_NAME: 3.0
+        }, {
+            TEXT_SPAN_FEATURE_NAME: 4.0
+        }]
     }]
     assert list(result) == expected_result
 
@@ -618,10 +584,10 @@ class SelectRowsSuite:
     db.compute_signal_columns(signal=test_signal, column=('text2', '*'))
 
     with pytest.raises(ValueError, match='Path part "invalid" not found in the dataset'):
-      db.select_rows(columns=[('text(test_signal)', 'invalid')])
+      db.select_rows(columns=[('test_signal(text)', 'invalid')])
 
     with pytest.raises(ValueError, match='Selecting a specific index of a repeated field'):
-      db.select_rows(columns=[('text2(test_signal)', 4)])
+      db.select_rows(columns=[('test_signal(text2)', 4)])
 
   def test_sort(self, tmp_path: pathlib.Path, db_cls: Type[DatasetDB]) -> None:
     db = make_db(db_cls, tmp_path, SIMPLE_ITEMS, SIMPLE_SCHEMA)
@@ -678,8 +644,8 @@ class TestSignal(Signal):
   embedding_based = False
 
   @override
-  def fields(self) -> dict[str, Field]:
-    return {'len': Field(dtype=DataType.INT32), 'flen': Field(dtype=DataType.FLOAT32)}
+  def fields(self) -> Field:
+    return Field(fields={'len': Field(dtype=DataType.INT32), 'flen': Field(dtype=DataType.FLOAT32)})
 
   @override
   def compute(
@@ -698,17 +664,14 @@ class TestSplitterWithLen(Signal):
   enrichment_type = EnrichmentType.TEXT
 
   @override
-  def fields(self) -> dict[str, Field]:
-    return {
-        'sentences':
-            Field(repeated_field=Field(fields=SpanFields({'len': Field(dtype=DataType.INT32)})))
-    }
+  def fields(self) -> Field:
+    return Field(repeated_field=Field(fields=SpanFields({'len': Field(dtype=DataType.INT32)})))
 
   @override
   def compute(self,
               data: Optional[Iterable[RichData]] = None,
               keys: Optional[Iterable[bytes]] = None,
-              get_embedding_index: Optional[GetEmbeddingIndexFn] = None) -> Iterable[Item]:
+              get_embedding_index: Optional[GetEmbeddingIndexFn] = None) -> Iterable[ItemValue]:
     if data is None:
       raise ValueError('Sentence splitter requires text data.')
 
@@ -716,12 +679,10 @@ class TestSplitterWithLen(Signal):
       if not isinstance(text, str):
         raise ValueError(f'Expected text to be a string, got {type(text)} instead.')
       sentences = [f'{sentence.strip()}.' for sentence in text.split('.') if sentence]
-      yield {
-          'sentences': [
-              SpanItem(span=(text.index(sentence), text.index(sentence) + len(sentence)),
-                       item={'len': len(sentence)}) for sentence in sentences
-          ]
-      }
+      yield [
+          SpanItem(span=(text.index(sentence), text.index(sentence) + len(sentence)),
+                   item={'len': len(sentence)}) for sentence in sentences
+      ]
 
 
 class TestEmbeddingSumSignal(Signal):
@@ -731,14 +692,14 @@ class TestEmbeddingSumSignal(Signal):
   embedding_based = True
 
   @override
-  def fields(self) -> dict[str, Field]:
-    return {'sum': Field(dtype=DataType.FLOAT32)}
+  def fields(self) -> Field:
+    return Field(dtype=DataType.FLOAT32)
 
   @override
   def compute(self,
               data: Optional[Iterable[RichData]] = None,
               keys: Optional[Iterable[bytes]] = None,
-              get_embedding_index: Optional[GetEmbeddingIndexFn] = None) -> Iterable[Item]:
+              get_embedding_index: Optional[GetEmbeddingIndexFn] = None) -> Iterable[ItemValue]:
     if keys is None:
       raise ValueError('Embedding sum signal requires keys.')
     if get_embedding_index is None:
@@ -750,7 +711,7 @@ class TestEmbeddingSumSignal(Signal):
     # The signal just sums the values of the embedding.
     embedding_sums = embedding_index.embeddings.sum(axis=1)
     for embedding_sum in embedding_sums.tolist():
-      yield {'sum': embedding_sum}
+      yield embedding_sum
 
 
 class TestInvalidSignal(Signal):
@@ -758,8 +719,8 @@ class TestInvalidSignal(Signal):
   enrichment_type = EnrichmentType.TEXT
 
   @override
-  def fields(self) -> dict[str, Field]:
-    return {'len': Field(dtype=DataType.INT32)}
+  def fields(self) -> Field:
+    return Field(dtype=DataType.INT32)
 
   @override
   def compute(

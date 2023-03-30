@@ -11,6 +11,7 @@ from ..schema import (
     Path,
     PathTuple,
     Schema,
+    SignalOut,
     column_paths_match,
     normalize_path,
 )
@@ -38,7 +39,7 @@ def replace_repeated_wildcards(path: Path, path_repeated_idxs: Optional[list[int
 
 
 def make_enriched_items(source_path: Path, row_ids: Sequence[bytes],
-                        leaf_items: Iterable[Optional[Item]],
+                        leaf_items: Iterable[Optional[SignalOut]],
                         repeated_idxs: Iterable[Optional[list[int]]]) -> Iterable[Item]:
   """Make enriched items from leaf items and a path. This is used by both signals and splitters.
 
@@ -97,7 +98,7 @@ def make_enriched_items(source_path: Path, row_ids: Sequence[bytes],
     yield working_enriched_item
 
 
-def enrich_item_from_leaf_item(enriched_item: Item, path: Path, leaf_item: Item) -> None:
+def enrich_item_from_leaf_item(enriched_item: Item, path: Path, leaf_item: SignalOut) -> None:
   """Create an enriched item with the same hierarchy as the source."""
   path = normalize_path(path)
 
@@ -133,19 +134,17 @@ def enrich_item_from_leaf_item(enriched_item: Item, path: Path, leaf_item: Item)
   enriched_subitem[path[-1]] = leaf_item  # type: ignore
 
 
-def create_enriched_schema(source_schema: Schema, enrich_path: Path,
-                           enrich_fields: dict[str, Field]) -> Schema:
+def create_enriched_schema(source_schema: Schema, enrich_path: Path, enrich_field: Field) -> Schema:
   """Create a schema describing the enriched fields added an enrichment."""
   enriched_schema = Schema(fields={UUID_COLUMN: Field(dtype=DataType.BINARY)})
   return _add_enriched_fields_to_schema(source_schema=source_schema,
                                         enriched_schema=enriched_schema,
-                                        enrich_fields=enrich_fields,
+                                        enrich_field=enrich_field,
                                         enrich_path=normalize_path(enrich_path))
 
 
 def _add_enriched_fields_to_schema(source_schema: Schema, enriched_schema: Schema,
-                                   enrich_fields: dict[str,
-                                                       Field], enrich_path: PathTuple) -> Schema:
+                                   enrich_field: Field, enrich_path: PathTuple) -> Schema:
   source_leafs = source_schema.leafs
   # Validate that the enrich fields are actually a valid leaf path.
   if enrich_path not in source_leafs:
@@ -169,7 +168,8 @@ def _add_enriched_fields_to_schema(source_schema: Schema, enriched_schema: Schem
 
     repeated_depth = len(leaf_path) - 1 - inner_struct_path_idx
 
-    inner_field = Field(fields=enrich_fields, enriched=True)
+    inner_field = enrich_field
+    inner_field.enriched = True
 
     # Wrap in a list to mirror the input structure.
     for i in range(repeated_depth):
@@ -212,7 +212,7 @@ def get_field_if_exists(schema: Schema, path: Path) -> Optional[Field]:
   return field
 
 
-def top_level_signal_col_name(signal: Signal, column: Column) -> str:
+def default_top_level_signal_col_name(signal: Signal, column: Column) -> str:
   """Return the default name for a result column."""
   if isinstance(column.feature, Column):
     raise ValueError('Transforms are not yet supported.')
@@ -222,4 +222,4 @@ def top_level_signal_col_name(signal: Signal, column: Column) -> str:
     # Remove the trailing .* from the column name.
     column_alias = column_alias[:-2]
 
-  return f'{column_alias}({signal.name})'
+  return f'{signal.name}({column_alias})'
