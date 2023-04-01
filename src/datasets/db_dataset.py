@@ -4,11 +4,14 @@ import enum
 from typing import Any, Iterable, Iterator, Optional, Sequence, Union
 
 import pandas as pd
-from pydantic import BaseModel
+from pydantic import BaseModel, validator
 
 from ..embeddings.embedding_registry import EmbeddingId
 from ..schema import Item, Path, Schema, path_to_alias
 from ..signals.signal import Signal
+
+# Threshold for rejecting certain queries (e.g. group by) for columns with large cardinality.
+TOO_MANY_DISTINCT = 100_000
 
 
 class SelectRowsResult():
@@ -20,6 +23,19 @@ class SelectRowsResult():
 
   def __iter__(self) -> Iterator:
     return iter(self.rows)
+
+
+class SelectGroupsResult():
+  """The result of a select groups query."""
+
+  @abc.abstractmethod
+  def __iter__(self) -> Iterator:
+    pass
+
+  @abc.abstractmethod
+  def to_df(self) -> pd.DataFrame:
+    """Convert the result to a pandas DataFrame."""
+    pass
 
 
 class StatsResult(BaseModel):
@@ -88,6 +104,28 @@ class Column(BaseModel):
 
 
 ColumnId = Union[Path, Column]
+
+# A bin can be a float, or a tuple of (label, float).
+
+
+class NamedBins(BaseModel):
+  """Named bins where each boundary has a label."""
+  bins: list[float]
+  # Labels is one more than bins. E.g. given bins [1, 2, 3], we have 4 labels (≤1, 1-2, 2-3, >3).
+  labels: Optional[list[str]]
+
+  @validator('labels')
+  def labels_is_one_more_than_bins(cls, labels: Optional[list[str]],
+                                   values: dict[str, Any]) -> Optional[list[str]]:
+    """Validate that the labels is one more than the bins."""
+    if not labels:
+      return None
+    if len(labels) != len(values['bins']) + 1:
+      raise ValueError('The number of labels must be one more than the number of bins.')
+    return labels
+
+
+Bins = Union[list[float], NamedBins]
 
 
 class DatasetManifest(BaseModel):
@@ -185,7 +223,8 @@ class DatasetDB(abc.ABC):
                     filters: Optional[Sequence[Filter]] = None,
                     sort_by: Optional[GroupsSortBy] = None,
                     sort_order: Optional[SortOrder] = SortOrder.DESC,
-                    limit: Optional[int] = 100) -> pd.DataFrame:
+                    limit: Optional[int] = 100,
+                    bins: Optional[Bins] = None) -> SelectGroupsResult:
     """Select grouped columns to power a histogram.
 
     Args:
@@ -195,9 +234,10 @@ class DatasetDB(abc.ABC):
       sort_by: What to sort by, either "count" or "value".
       sort_order: The sort order.
       limit: The maximum number of rows to return.
+      bins: The bins to use when bucketizing a float column.
 
     Returns
-      A dataframe with counts for each value of the leaf, applying the filters.
+      A `SelectGroupsResult` iterator where each row is a group.
     """
     raise NotImplementedError
 

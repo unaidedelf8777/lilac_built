@@ -2,7 +2,7 @@
 import functools
 import itertools
 import os
-from typing import Any, Iterable, Optional, Sequence, Union, cast
+from typing import Any, Iterable, Iterator, Optional, Sequence, Union, cast
 
 import duckdb
 import pandas as pd
@@ -25,6 +25,8 @@ from ..schema import (
     PathTuple,
     Schema,
     SourceManifest,
+    is_float,
+    is_integer,
     is_ordinal,
     is_repeated_path_part,
     normalize_path,
@@ -38,18 +40,22 @@ from ..utils import (
     open_file,
     write_items_to_parquet,
 )
+from . import db_dataset
 from .dataset_utils import (
     create_enriched_schema,
     default_top_level_signal_col_name,
     make_enriched_items,
 )
 from .db_dataset import (
+    Bins,
     Column,
     ColumnId,
     DatasetDB,
     DatasetManifest,
     Filter,
     GroupsSortBy,
+    NamedBins,
+    SelectGroupsResult,
     SelectRowsResult,
     SortOrder,
     StatsResult,
@@ -65,6 +71,23 @@ SOURCE_VIEW_NAME = 'source'
 
 # Sample size for approximating the distinct count of a column.
 SAMPLE_SIZE_DISTINCT_COUNT = 100_000
+
+
+class DuckDBSelectGroupsResult(SelectGroupsResult):
+  """The result of a select groups query backed by DuckDB."""
+
+  def __init__(self, duckdb_result: duckdb.DuckDBPyRelation) -> None:
+    """Initialize the result."""
+    self._duckdb_result = duckdb_result
+
+  @override
+  def __iter__(self) -> Iterator:
+    return iter(cast(Iterable, self._duckdb_result.fetchall()))
+
+  @override
+  def to_df(self) -> pd.DataFrame:
+    """Convert the result to a pandas DataFrame."""
+    return self._duckdb_result.to_df()
 
 
 class ComputedColumn(BaseModel):
@@ -478,10 +501,58 @@ class DatasetDuckDB(DatasetDB):
   def select_groups(self,
                     leaf_path: Path,
                     filters: Optional[Sequence[Filter]] = None,
-                    sort_by: Optional[GroupsSortBy] = None,
+                    sort_by: Optional[GroupsSortBy] = GroupsSortBy.COUNT,
                     sort_order: Optional[SortOrder] = SortOrder.DESC,
-                    limit: Optional[int] = 100) -> pd.DataFrame:
-    pass
+                    limit: Optional[int] = 100,
+                    bins: Optional[Bins] = None) -> SelectGroupsResult:
+    if not leaf_path:
+      raise ValueError('leaf_path must be provided')
+    path = normalize_path(leaf_path)
+    manifest = self.manifest()
+    leaf = manifest.data_schema.leafs.get(path)
+    if not leaf or not leaf.dtype:
+      raise ValueError(f'Leaf "{path}" not found in dataset')
+
+    stats = self.stats(leaf_path)
+    if stats.approx_count_distinct >= db_dataset.TOO_MANY_DISTINCT:
+      raise ValueError(f'Leaf "{path}" has too many unique values: {stats.approx_count_distinct}')
+
+    inner_val = 'inner_val'
+    outer_select = inner_val
+    if is_float(leaf.dtype) or is_integer(leaf.dtype):
+      if bins is None:
+        raise ValueError(f'"bins" needs to be defined for the int/float leaf "{path}"')
+      # Normalize the bins to be `NamedBins`.
+      named_bins = bins if isinstance(bins, NamedBins) else NamedBins(bins=bins)
+      bounds = []
+      # Normalize the bins to be in the form of (label, bound).
+
+      for i in range(len(named_bins.bins) + 1):
+        prev = named_bins.bins[i - 1] if i > 0 else "'-Infinity'"
+        next = named_bins.bins[i] if i < len(named_bins.bins) else "'Infinity'"
+        label = f"'{named_bins.labels[i]}'" if named_bins.labels else i
+        bounds.append(f'({label}, {prev}, {next})')
+      bin_index_col = 'col0'
+      bin_min_col = 'col1'
+      bin_max_col = 'col2'
+      # We cast the field to `double` so bining works for both `float` and `int` fields.
+      outer_select = f"""(
+        SELECT {bin_index_col} FROM (
+          VALUES {', '.join(bounds)}
+        ) WHERE {inner_val}::DOUBLE >= {bin_min_col} AND {inner_val}::DOUBLE < {bin_max_col}
+      )"""
+    count_column = 'count'
+    value_column = 'value'
+
+    inner_select = make_select_column(path)
+    query = f"""
+      SELECT {outer_select} AS {value_column}, COUNT() AS {count_column}
+      FROM (SELECT {inner_select} AS {inner_val} FROM t)
+      GROUP BY {value_column}
+      ORDER BY {sort_by} {sort_order}
+      LIMIT {limit}
+    """
+    return DuckDBSelectGroupsResult(self._query(query))
 
   @override
   def select_rows(self,
