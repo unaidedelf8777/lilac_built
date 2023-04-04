@@ -90,7 +90,7 @@ def compute_signal_column(namespace: str, dataset_name: str, options: ComputeSig
 
 @router.get('/{namespace}/{dataset_name}/select_rows')
 def select_rows(namespace: str, dataset_name: str,
-                options: SelectDatasetRowsOptions = Depends()) -> list:
+                options: SelectDatasetRowsOptions = Depends()) -> list[dict]:
   """Select rows from the dataset database."""
   dataset_db = get_dataset_db(namespace, dataset_name)
 
@@ -118,4 +118,4 @@ def select_rows(namespace: str, dataset_name: str,
   for item in items:
     item[UUID_COLUMN] = item[UUID_COLUMN].hex()
 
-  return list(items)
+  return items
