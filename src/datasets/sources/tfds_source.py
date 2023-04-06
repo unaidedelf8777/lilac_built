@@ -5,11 +5,14 @@ from typing import Optional, Union
 import numpy as np
 import tensorflow as tf
 import tensorflow_datasets as tfds
-from pydantic import BaseModel
+from pydantic import (
+    BaseModel,
+    Field as PydanticField,
+)
 
 from ...schema import PARQUET_FILENAME_PREFIX, UUID_COLUMN, DataType, Field, Item, Schema
 from ...utils import log, write_items_to_parquet
-from .source import ShardsLoader, Source, SourceProcessResult
+from .source import ShardsLoader, Source, SourceProcessResult, SourceShardOut, default_shards_loader
 
 TFDSElement = Union[dict, tf.RaggedTensor, tf.Tensor]
 
@@ -122,22 +125,36 @@ def _tfds_schema_to_schema(feature: tfds.features.FeaturesDict) -> Schema:
   return Schema(fields=fields)
 
 
-class TFDSSource(Source):
-  """TFDS source."""
+class TensorFlowDataset(Source[ShardInfo]):
+  """TensorFlow datasets data loader
+
+  For a list of datasets see:
+    [https://www.tensorflow.org/datasets/catalog/overview](https://www.tensorflow.org/datasets/catalog/overview).
+
+  For documentation on dataset loading see:
+      [https://www.tensorflow.org/datasets/overview](https://www.tensorflow.org/datasets/overview)
+  """ # noqa: D415, D400
   name = 'tfds'
+  shard_info_cls = ShardInfo
 
-  dataset_name: str
-  split: Optional[str] = None
+  tfds_name: str
+  split: Optional[str] = PydanticField(
+      default=None,
+      description='The TensorFlow dataset split name. If not provided, loads all splits.')
 
-  async def process(self, output_dir: str, shards_loader: ShardsLoader) -> SourceProcessResult:
+  async def process(self,
+                    output_dir: str,
+                    shards_loader: Optional[ShardsLoader] = None) -> SourceProcessResult:
     """Process the source upload request."""
-    builder = tfds.builder(self.dataset_name)
+    shards_loader = shards_loader or default_shards_loader(self)
+
+    builder = tfds.builder(self.tfds_name)
     split = list(builder.info.splits.keys())[0]
     if self.split:
       split = self.split
     elif 'train' in builder.info.splits:
       split = 'train'
-    log(f'TFDS({self.dataset_name}): Using split "{split}"')
+    log(f'TFDS({self.tfds_name}): Using split "{split}"')
 
     if not builder.info.splits.total_num_examples:
       raise ValueError(f'No examples found in {builder.name!r}. Was the dataset generated ?')
@@ -152,25 +169,25 @@ class TFDSSource(Source):
     schema = _tfds_schema_to_schema(builder.info.features)
     num_shards = builder.info.splits[split].num_shards
     shard_infos = [
-        ShardInfo(dataset_name=self.dataset_name,
+        ShardInfo(dataset_name=self.tfds_name,
                   split=split,
                   data_schema=schema,
                   shard_index=shard_index,
                   num_shards=num_shards,
                   output_dir=output_dir) for shard_index in range(num_shards)
     ]
-    shard_outs = await shards_loader([x.dict(exclude_none=True) for x in shard_infos])
-    filepaths: list[str] = [x['filepath'] for x in shard_outs]
-    num_items = sum(x['num_items'] for x in shard_outs)
+
+    shard_outs = await shards_loader(shard_infos)
+    filepaths = [shard_out.filepath for shard_out in shard_outs]
+    num_items = sum(shard_out.num_items for shard_out in shard_outs)
 
     return SourceProcessResult(filepaths=filepaths,
                                data_schema=schema,
                                images=None,
                                num_items=num_items)
 
-  def process_shard(self, shard_info_dict: dict) -> dict:
+  def process_shard(self, shard_info: ShardInfo) -> SourceShardOut:
     """Process an input file shard. Each shard is processed in parallel by different workers."""
-    shard_info = ShardInfo(**shard_info_dict)
     ds = tfds.load(shard_info.dataset_name,
                    split=f'{shard_info.split}[{shard_info.shard_index}shard]')
 
@@ -182,4 +199,4 @@ class TFDSSource(Source):
                                                  filename_prefix=PARQUET_FILENAME_PREFIX,
                                                  shard_index=shard_info.shard_index,
                                                  num_shards=shard_info.num_shards)
-    return {'filepath': filepath, 'num_items': num_items}
+    return SourceShardOut(filepath=filepath, num_items=num_items)

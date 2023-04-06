@@ -1,2 +1,15 @@
 @tailwind base;
 @tailwind utilities;
+
+@layer base {
+  /* These styles set the default classes for the header tags as they are not styled by default. */
+  h1 {
+    @apply text-3xl lg:text-5xl;
+  }
+  h2 {
+    @apply text-2xl lg:text-3xl;
+  }
+  h3 {
+    @apply text-lg lg:text-xl font-bold;
+  }
+}

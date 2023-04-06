@@ -1,7 +1,28 @@
 import {SerializedError} from '@reduxjs/toolkit';
-import {SlTooltip} from '@shoelace-style/shoelace/dist/react';
+import {SlSpinner, SlTooltip} from '@shoelace-style/shoelace/dist/react';
 import * as React from 'react';
 import {Path} from './schema';
+
+export function renderQuery<T>(
+  queryResult: {
+    isFetching?: boolean;
+    error?: string | SerializedError | undefined;
+    currentData?: T;
+  },
+  render: (data: T) => JSX.Element
+): JSX.Element {
+  if (queryResult == null) {
+    return <></>;
+  }
+  const {isFetching, error, currentData} = queryResult;
+  if (isFetching) {
+    return <SlSpinner />;
+  }
+  if (error || currentData == null) {
+    return renderError(error);
+  }
+  return render(queryResult.currentData!);
+}
 
 export function renderError(error: string | SerializedError | undefined): JSX.Element {
   if (error == null) {
@@ -26,8 +47,8 @@ export function renderPath(leafPath: Path): string {
   return leafPath.join('.');
 }
 
-export function getModelLink(username: string, modelName: string): string {
-  return `/${username}/${modelName}`;
+export function getDatasetLink(namespace: string, datasetName: string): string {
+  return `/datasets/${namespace}/${datasetName}`;
 }
 
 export function roundNumber(val: number, precision: number): number {

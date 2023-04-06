@@ -1,6 +1,5 @@
 """Pandas source."""
 import os
-import time
 from typing import Any, Optional
 
 import duckdb
@@ -20,7 +19,7 @@ from ...utils import (
     makedirs,
     open_file,
 )
-from .source import ShardsLoader, Source, SourceProcessResult
+from .source import ShardsLoader, Source, SourceProcessResult, SourceShardOut, default_shards_loader
 
 
 class ImageColumn(BaseModel):
@@ -37,13 +36,7 @@ class ShardInfo(BaseModel):
   image_columns: Optional[list[ImageColumn]]
 
 
-class ShardOut(BaseModel):
-  """Output of processing a single shard."""
-  filepath: str
-  num_items: int
-
-
-class PandasSource(Source):
+class PandasDataset(Source[ShardInfo]):
   """Pandas source."""
   name = 'pandas'
 
@@ -60,19 +53,19 @@ class PandasSource(Source):
     super().__init__(**kwargs)
     self._df = df
 
-  async def process(self, output_dir: str, shards_loader: ShardsLoader) -> SourceProcessResult:
+  async def process(self,
+                    output_dir: str,
+                    shards_loader: Optional[ShardsLoader] = None) -> SourceProcessResult:
     """Process the source upload request."""
+    shards_loader = shards_loader or default_shards_loader(self)
+
     shard_info = ShardInfo(image_base_path=self.image_base_path,
                            output_dir=output_dir,
-                           image_columns=self.image_columns).dict(exclude_none=True)
+                           image_columns=self.image_columns)
 
-    start_time = time.time()
-    shard_outs = [ShardOut(**x) for x in (await shards_loader([shard_info]))]
-    elapsed = time.time() - start_time
-    log(f'[Pandas Source] Converting pandas to parquet took {elapsed:.2f} seconds.')
-
-    filepaths: list[str] = [x.filepath for x in shard_outs]
-    num_items = sum(x.num_items for x in shard_outs)
+    shard_outs = await shards_loader([shard_info])
+    filepaths = [shard_out.filepath for shard_out in shard_outs]
+    num_items = sum(shard_out.num_items for shard_out in shard_outs)
     arrow_schema = pq.read_schema(open_file(filepaths[0], mode='rb'))
     schema = arrow_schema_to_schema(arrow_schema)
     images: Optional[list[ImageInfo]] = None
@@ -88,8 +81,7 @@ class PandasSource(Source):
                                num_items=num_items)
 
   @override
-  def process_shard(self, shard_info_dict: dict) -> dict:
-    shard_info = ShardInfo(**shard_info_dict)
+  def process_shard(self, shard_info: ShardInfo) -> SourceShardOut:
     con = duckdb.connect(database=':memory:')
     con.install_extension('httpfs')
     con.load_extension('httpfs')
@@ -159,7 +151,7 @@ class PandasSource(Source):
                  input_gcs=GCS_REGEX.match(image_base_path) is not None,
                  output_gcs=GCS_REGEX.match(out_filepath) is not None)
     con.close()
-    return {'filepath': out_filepath, 'num_items': int(shard_num_items)}
+    return SourceShardOut(filepath=out_filepath, num_items=int(shard_num_items))
 
 
 def _pandas_column_to_path(column_name: str) -> Path:

@@ -1,24 +1,27 @@
 """A source to compute semantic search for a document."""
-from typing import Iterable, cast
+from typing import Iterable, Optional, cast
 
 import pytest
+from pydantic import BaseModel
 from typing_extensions import override
 
-from .source import ShardsLoader, Source, SourceProcessResult
+from .source import ShardsLoader, Source, SourceProcessResult, SourceShardOut
 from .source_registry import clear_source_registry, get_source_cls, register_source, resolve_source
 
 
-class TestSource(Source):
+class TestSource(Source[BaseModel]):
   """A test source."""
   name = 'test_source'
 
   @override
-  async def process(self, output_dir: str, shards_loader: ShardsLoader) -> SourceProcessResult:
+  async def process(self,
+                    output_dir: str,
+                    shards_loader: Optional[ShardsLoader] = None) -> SourceProcessResult:
     return cast(SourceProcessResult, None)
 
   @override
-  def process_shard(self, shard_info_dict: dict) -> dict:
-    return {}
+  def process_shard(self, shard_info: BaseModel) -> SourceShardOut:
+    return cast(SourceShardOut, None)
 
 
 @pytest.fixture(scope='module', autouse=True)
