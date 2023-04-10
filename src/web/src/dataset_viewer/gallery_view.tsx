@@ -5,7 +5,7 @@ import {DataType, Field, StatsResult, WebManifest} from '../../fastapi_client';
 import {useAppDispatch, useAppSelector} from '../hooks';
 import {Path, Schema, serializePath} from '../schema';
 import {useGetManifestQuery, useGetMultipleStatsQuery} from '../store/api_dataset';
-import {setBrowserPreviewPaths, useGetIds} from '../store/store';
+import {setSelectedMediaPaths, setSelectedMetadataPaths, useGetIds} from '../store/store';
 import {renderPath} from '../utils';
 import {GalleryItem} from './gallery_item';
 import styles from './gallery_view.module.css';
@@ -17,7 +17,8 @@ export interface GalleryProps {
 
 /** Number of items to be fetched when fetching the next page. */
 const ITEMS_PAGE_SIZE = 40;
-
+/** The average item width in pixels. Multiple items can share the row if there is enough width. */
+const AVG_ITEM_WIDTH_PX = 500;
 /**
  * A hook that allows for infinite fetch with paging. The hook exports fetchNextPage which should
  * be called by users to fetch the next page.
@@ -51,7 +52,8 @@ function useInfiniteItemsQuery(namespace: string, datasetName: string) {
 
 export interface GalleryMenuProps {
   schema: Schema;
-  previewPaths: Path[];
+  mediaPaths: Path[];
+  metadataPaths?: Path[];
 }
 
 interface VisualLeaf {
@@ -63,96 +65,138 @@ export const IMAGE_PATH_PREFIX = '__image__';
 
 export const GalleryMenu = React.memo(function GalleryMenu({
   schema,
-  previewPaths,
+  mediaPaths,
+  metadataPaths,
 }: GalleryMenuProps): JSX.Element {
   const dispatch = useAppDispatch();
-  const leafs: [Path, VisualLeaf | Field][] = [...schema.leafs];
 
-  const items = leafs.map(([path, field], i) => {
-    return (
-      <SlOption key={i} value={i.toString()}>
-        {renderPath(path)} : {field.dtype}
-      </SlOption>
-    );
+  const mediaLeafs: [Path, VisualLeaf | Field][] = [...schema.leafs].filter(([, field]) => {
+    if (field.dtype === 'string' || field.dtype === 'string_span') {
+      return true;
+    }
+    return false;
   });
+  const leafs = [...schema.leafs];
+  return (
+    <div className="flex h-16">
+      {/* Media dropdown. */}
+      <FeatureDropdown
+        label="Media to preview"
+        selectedPaths={mediaPaths}
+        leafs={mediaLeafs}
+        onSelectedPathsChanged={(paths) => dispatch(setSelectedMediaPaths(paths))}
+      />
+      {/* Metadata dropdown. */}
+      <FeatureDropdown
+        label="Metadata to preview"
+        selectedPaths={metadataPaths}
+        leafs={leafs}
+        onSelectedPathsChanged={(paths) => dispatch(setSelectedMetadataPaths(paths))}
+      />
+    </div>
+  );
+});
 
-  const previewPathsSet = new Set(previewPaths.map((p) => serializePath(p)));
+interface FeatureDropdownProps {
+  label: string;
+  selectedPaths?: Path[];
+  onSelectedPathsChanged: (paths: Path[]) => void;
+  leafs: [Path, VisualLeaf | Field][];
+}
+
+function FeatureDropdown({
+  label,
+  selectedPaths,
+  leafs,
+  onSelectedPathsChanged,
+}: FeatureDropdownProps): JSX.Element {
+  selectedPaths = selectedPaths || [];
+  const selectedPathsSet = new Set(selectedPaths.map((p) => serializePath(p)));
   const selectedIndices: string[] = [];
   let index = 0;
   for (const [path] of leafs) {
-    if (previewPathsSet.has(serializePath(path))) {
+    if (selectedPathsSet.has(serializePath(path))) {
       selectedIndices.push(index.toString());
     }
     index++;
   }
 
-  const previewPathsChanged = (indices: string[]) => {
+  function onSelectedIndicesChanged(indices: string[]) {
     if (indices === selectedIndices) {
       // Avoids an infinite loop (bug in Shoelace select component) where setting the value
       // declaratively below leads to firing onChange.
       return;
     }
     const paths = indices.map((index) => leafs[Number(index)][0]);
-    dispatch(setBrowserPreviewPaths(paths));
-  };
+    onSelectedPathsChanged(paths);
+  }
 
   return (
-    <div className="flex h-16">
-      {/* Features preview dropdown. */}
-      <div className="flex flex-col w-96">
-        <div>
-          <label>Preview features</label>
-        </div>
-        <div className="flex h-full items-center">
-          <SlSelect
-            className={`mr-2 w-full ${styles.gallery_preview_dropdown}`}
-            size="small"
-            value={selectedIndices}
-            placeholder="Select fields to preview"
-            multiple
-            maxOptionsVisible={2}
-            hoist={true}
-            onSlChange={(e) =>
-              previewPathsChanged((e.target as HTMLInputElement).value as unknown as string[])
-            }
-          >
-            {items}
-          </SlSelect>
-        </div>
+    <div className="flex flex-col w-96">
+      <div>
+        <label>{label}</label>
+      </div>
+      <div className="flex h-full items-center">
+        <SlSelect
+          className={`mr-2 w-full ${styles.gallery_preview_dropdown}`}
+          size="small"
+          value={selectedIndices}
+          placeholder="Select features..."
+          multiple
+          maxOptionsVisible={2}
+          hoist={true}
+          onSlChange={(e) =>
+            onSelectedIndicesChanged((e.target as HTMLInputElement).value as unknown as string[])
+          }
+        >
+          {leafs.map(([path], i) => {
+            return (
+              <SlOption key={i} value={i.toString()}>
+                {renderPath(path)}
+              </SlOption>
+            );
+          })}
+        </SlSelect>
       </div>
     </div>
   );
-});
+}
 
 export interface GalleryRowProps {
   /** List of run ids to render in a single row. */
   namespace: string;
   datasetName: string;
   itemIds: string[];
-  previewPaths: Path[];
+  mediaPaths: Path[];
+  metadataPaths?: Path[];
 }
 
 export const GalleryRow = React.memo(function GalleryRow({
   namespace,
   datasetName,
   itemIds,
-  previewPaths,
+  mediaPaths,
+  metadataPaths,
 }: GalleryRowProps): JSX.Element {
+  const hundredPerc = 100;
+  const widthPerc = (hundredPerc / itemIds.length).toFixed(2);
   const galleryItems = itemIds.map((itemId) => {
     return (
-      <GalleryItem
-        key={itemId}
-        namespace={namespace}
-        datasetName={datasetName}
-        itemId={itemId}
-        previewPaths={previewPaths!}
-      ></GalleryItem>
+      <div key={itemId} style={{width: `${widthPerc}%`}}>
+        <GalleryItem
+          namespace={namespace}
+          datasetName={datasetName}
+          itemId={itemId}
+          mediaPaths={mediaPaths}
+          metadataPaths={metadataPaths}
+        ></GalleryItem>
+      </div>
     );
   });
-  return <div className="flex w-full h-full py-px">{galleryItems}</div>;
+  return <div className="flex w-full h-full py-px shrink">{galleryItems}</div>;
 });
 
-export function usePreviewPaths(
+export function useMediaPaths(
   namespace: string,
   datasetName: string,
   manifest: WebManifest | null | undefined,
@@ -166,11 +210,11 @@ export function usePreviewPaths(
       }
     }
   }
-  let previewPaths = useAppSelector((state) => state.app.selectedData.browser.previewPaths);
+  let mediaPaths = useAppSelector((state) => state.app.selectedData.browser.selectedMediaPaths);
   const multipleStats = useGetMultipleStatsQuery({namespace, datasetName, leafPaths: stringLeafs});
-  previewPaths = React.useMemo(() => {
-    if (previewPaths != null) {
-      return previewPaths;
+  mediaPaths = React.useMemo(() => {
+    if (mediaPaths != null) {
+      return mediaPaths;
     }
     if (manifest == null) {
       return [];
@@ -188,8 +232,8 @@ export function usePreviewPaths(
       });
     const longestLeafIndex = stringLeafsByLength[0][0];
     return [stringLeafs[longestLeafIndex]];
-  }, [manifest, previewPaths, multipleStats.currentData]);
-  return previewPaths;
+  }, [manifest, mediaPaths, multipleStats.currentData]);
+  return mediaPaths;
 }
 
 export const Gallery = React.memo(function Gallery({
@@ -202,7 +246,10 @@ export const Gallery = React.memo(function Gallery({
     error: manifestError,
   } = useGetManifestQuery({namespace, datasetName});
   const schema = webManifest != null ? new Schema(webManifest.dataset_manifest.data_schema) : null;
-  const previewPaths = usePreviewPaths(namespace, datasetName, webManifest, schema);
+  const mediaPaths = useMediaPaths(namespace, datasetName, webManifest, schema);
+  const metadataPaths = useAppSelector(
+    (state) => state.app.selectedData.browser.selectedMetadataPaths
+  );
 
   const {error, isFetchingNextPage, allIds, hasNextPage, fetchNextPage} = useInfiniteItemsQuery(
     namespace,
@@ -211,7 +258,6 @@ export const Gallery = React.memo(function Gallery({
   // `useVirtualizer needs a reference to the scrolling element below.
   const parentRef = React.useRef<HTMLDivElement | null>(null);
   const [itemsPerRow, setItemsPerRow] = React.useState(1);
-  const itemWidthPx = 500;
   const numRows = Math.ceil(allIds.length / itemsPerRow);
 
   const virtualizer = useVirtualizer({
@@ -243,7 +289,7 @@ export const Gallery = React.memo(function Gallery({
       }
       const observer = new ResizeObserver((entries) => {
         const galleryWidthPx = entries[0].contentRect.width;
-        const itemsPerRow = Math.max(1, Math.round(galleryWidthPx / itemWidthPx));
+        const itemsPerRow = Math.max(1, Math.round(galleryWidthPx / AVG_ITEM_WIDTH_PX));
         setItemsPerRow(itemsPerRow);
       });
       observer.observe(parentRef.current);
@@ -266,7 +312,11 @@ export const Gallery = React.memo(function Gallery({
   return (
     <div className="flex h-full w-full flex-col">
       <div className="mb-4">
-        <GalleryMenu schema={schema} previewPaths={previewPaths}></GalleryMenu>
+        <GalleryMenu
+          schema={schema}
+          mediaPaths={mediaPaths}
+          metadataPaths={metadataPaths}
+        ></GalleryMenu>
       </div>
       <div ref={parentRef} className="overflow-y-scroll h-full w-full">
         <div
@@ -296,7 +346,7 @@ export const Gallery = React.memo(function Gallery({
                   key={virtualRow.index}
                   data-index={virtualRow.index}
                   ref={virtualizer.measureElement}
-                  style={{width: '100%'}}
+                  className="w-full"
                 >
                   {isLoaderRow ? (
                     <div className={styles.loader_row}>Loading more...</div>
@@ -305,7 +355,8 @@ export const Gallery = React.memo(function Gallery({
                       namespace={namespace}
                       datasetName={datasetName}
                       itemIds={itemIds}
-                      previewPaths={previewPaths!}
+                      mediaPaths={mediaPaths}
+                      metadataPaths={metadataPaths}
                     ></GalleryRow>
                   )}
                 </div>
