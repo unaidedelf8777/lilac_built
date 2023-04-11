@@ -21,6 +21,7 @@ from ...schema import (
     Schema,
     arrow_dtype_to_dtype,
 )
+from ...tasks import TaskId
 from ...utils import write_items_to_parquet
 from .source import ShardsLoader, Source, SourceProcessResult, SourceShardOut, default_shards_loader
 
@@ -115,6 +116,8 @@ class HuggingFaceDataset(Source[ShardInfo]):
   shard_info_cls = ShardInfo
 
   dataset_name: str
+  config_name: Optional[str] = PydanticField(
+      description='HuggingFace dataset config. Some datasets require this.', default=None)
   split: Optional[str] = PydanticField(
       description='HuggingFace dataset split. Loads all splits by default.', default=None)
   revision: Optional[str] = PydanticField(description='HuggingFace dataset revision.', default=None)
@@ -122,9 +125,12 @@ class HuggingFaceDataset(Source[ShardInfo]):
       description='Load from local disk instead of the hub.', default=False)
 
   @override
-  async def process(self,
-                    output_dir: str,
-                    shards_loader: Optional[ShardsLoader] = None) -> SourceProcessResult:
+  async def process(
+      self,
+      output_dir: str,
+      shards_loader: Optional[ShardsLoader] = None,
+      task_id: Optional[TaskId] = None,
+  ) -> SourceProcessResult:
     """Process the source upload request."""
     shards_loader = shards_loader or default_shards_loader(self)
 
@@ -132,7 +138,9 @@ class HuggingFaceDataset(Source[ShardInfo]):
       # Load from disk.
       hf_dataset_dict = {DEFAULT_LOCAL_SPLIT_NAME: load_from_disk(self.dataset_name)}
     else:
-      hf_dataset_dict = load_dataset(self.dataset_name, num_proc=multiprocessing.cpu_count())
+      hf_dataset_dict = load_dataset(self.dataset_name,
+                                     self.config_name,
+                                     num_proc=multiprocessing.cpu_count())
 
     schema_info = _hf_schema_to_schema(hf_dataset_dict, self.split)
 
@@ -157,7 +165,9 @@ class HuggingFaceDataset(Source[ShardInfo]):
       # Load from disk.
       hf_dataset_dict = {DEFAULT_LOCAL_SPLIT_NAME: load_from_disk(self.dataset_name)}
     else:
-      hf_dataset_dict = load_dataset(self.dataset_name, num_proc=multiprocessing.cpu_count())
+      hf_dataset_dict = load_dataset(self.dataset_name,
+                                     self.config_name,
+                                     num_proc=multiprocessing.cpu_count())
     items = _convert_to_items(hf_dataset_dict, shard_info.schema_info.class_labels,
                               shard_info.split)
     filepath, num_items = write_items_to_parquet(items=items,

@@ -27,6 +27,7 @@ export type { GroupsSortBy } from './models/GroupsSortBy';
 export type { HTTPValidationError } from './models/HTTPValidationError';
 export type { LabeledExample } from './models/LabeledExample';
 export type { LoadDatasetOptions } from './models/LoadDatasetOptions';
+export type { LoadDatasetResponse } from './models/LoadDatasetResponse';
 export type { LoadDatasetShardOptions } from './models/LoadDatasetShardOptions';
 export type { NamedBins } from './models/NamedBins';
 export type { SaveModelOptions } from './models/SaveModelOptions';
@@ -42,6 +43,9 @@ export type { Source } from './models/Source';
 export type { SourceShardOut } from './models/SourceShardOut';
 export type { SourcesList } from './models/SourcesList';
 export type { StatsResult } from './models/StatsResult';
+export type { TaskInfo } from './models/TaskInfo';
+export type { TaskManifest } from './models/TaskManifest';
+export type { TaskStatus } from './models/TaskStatus';
 export type { ValidationError } from './models/ValidationError';
 export type { WebManifest } from './models/WebManifest';
 

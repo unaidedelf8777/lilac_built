@@ -5,7 +5,7 @@ import {configureStore, PayloadAction, SerializedError} from '@reduxjs/toolkit';
 import {createApi} from '@reduxjs/toolkit/query/react';
 
 import {createSlice} from '@reduxjs/toolkit';
-import {Filter} from '../../fastapi_client';
+import {DefaultService, Filter, TaskManifest} from '../../fastapi_client';
 import {Item, Path, UUID_COLUMN} from '../schema';
 import {
   AddDatasetOptions,
@@ -21,6 +21,7 @@ import {
   SearchExamplesResponse,
 } from '../server_api_deprecated';
 import {datasetApi, useSelectRowsQuery} from './api_dataset';
+import {query} from './api_utils';
 
 interface SelectedData {
   namespace?: string;
@@ -64,6 +65,17 @@ const appSlice = createSlice({
       state.selectedData.browser.rowHeightListPx = action.payload;
     },
   },
+});
+export const serverApi = createApi({
+  reducerPath: 'serverApi',
+  baseQuery: () => {
+    return {error: 'baseQuery should never be called.'};
+  },
+  endpoints: (builder) => ({
+    getTaskManifest: builder.query<TaskManifest, void>({
+      queryFn: async () => query(() => DefaultService.getTaskManifest()),
+    }),
+  }),
 });
 
 const MODELS_TAG = 'models';
@@ -215,6 +227,7 @@ export const store = configureStore({
   reducer: {
     [appSlice.name]: appSlice.reducer,
     [dbApi.reducerPath]: dbApi.reducer,
+    [serverApi.reducerPath]: serverApi.reducer,
     [datasetApi.reducerPath]: datasetApi.reducer,
   },
   middleware: (getDefaultMiddleware) =>
@@ -236,6 +249,7 @@ export const {
   useAddExamplesMutation,
   useLazySearchExamplesQuery,
 } = dbApi;
+export const {useGetTaskManifestQuery, useLazyGetTaskManifestQuery} = serverApi;
 
 /** Fetches the data associated with an item from the dataset. */
 export function useGetItem(

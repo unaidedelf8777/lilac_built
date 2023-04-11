@@ -4,12 +4,26 @@
 import type { AddDatasetOptions } from '../models/AddDatasetOptions';
 import type { AddExamplesOptions } from '../models/AddExamplesOptions';
 import type { SaveModelOptions } from '../models/SaveModelOptions';
+import type { TaskManifest } from '../models/TaskManifest';
 
 import type { CancelablePromise } from '../core/CancelablePromise';
 import { OpenAPI } from '../core/OpenAPI';
 import { request as __request } from '../core/request';
 
 export class DefaultService {
+
+    /**
+     * Get Task Manifest
+     * Get the tasks, both completed and pending.
+     * @returns TaskManifest Successful Response
+     * @throws ApiError
+     */
+    public static getTaskManifest(): CancelablePromise<TaskManifest> {
+        return __request(OpenAPI, {
+            method: 'GET',
+            url: '/tasks',
+        });
+    }
 
     /**
      * List Models

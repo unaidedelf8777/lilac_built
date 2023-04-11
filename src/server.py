@@ -17,6 +17,7 @@ from .server_api import (
     SaveModelOptions,
     SearchExamplesOptions,
 )
+from .tasks import TaskManifest, task_manager
 
 DIST_PATH = os.path.abspath(os.path.join('dist'))
 
@@ -58,6 +59,18 @@ app.mount('/static',
 app.mount('/hot',
           StaticFiles(directory=os.path.join(DIST_PATH, 'hot'), check_dir=False),
           name='hot')
+
+
+@app.on_event('shutdown')
+def shutdown_event() -> None:
+  """Kill the task manager when FastAPI shuts down."""
+  task_manager().stop()
+
+
+@app.get('/tasks')
+def get_task_manifest() -> TaskManifest:
+  """Get the tasks, both completed and pending."""
+  return task_manager().manifest()
 
 
 @app.get('/db/list_models')
