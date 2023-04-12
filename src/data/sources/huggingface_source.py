@@ -21,9 +21,9 @@ from ...schema import (
     Schema,
     arrow_dtype_to_dtype,
 )
-from ...tasks import TaskId
+from ...tasks import TaskId, progress
 from ...utils import write_items_to_parquet
-from .source import ShardsLoader, Source, SourceProcessResult, SourceShardOut, default_shards_loader
+from .source import Source, SourceProcessResult
 
 TFDSElement = Union[dict, tf.RaggedTensor, tf.Tensor]
 
@@ -37,6 +37,7 @@ class SchemaInfo(BaseModel):
   """Information about the processed huggingface schema."""
   data_schema: Schema
   class_labels: dict[str, list[str]]
+  num_items: int
 
 
 class ShardInfo(BaseModel):
@@ -59,7 +60,7 @@ def _convert_to_items(hf_dataset_dict: DatasetDict, class_labels: dict[str, list
     split_dataset = hf_dataset_dict[split_name]
     for example in split_dataset:
       # Replace the class labels with strings.
-      for feature_name, label in class_labels.items():
+      for feature_name in class_labels.keys():
         if feature_name in example:
           example[feature_name] = class_labels[feature_name][example[feature_name]]
 
@@ -78,8 +79,10 @@ def _hf_schema_to_schema(hf_dataset_dict: DatasetDict, split: Optional[str]) -> 
 
   fields: dict[str, Field] = {}
   class_labels: dict[str, list[str]] = {}
+  num_items = 0
 
   for split_dataset in split_datasets:
+    num_items += len(split_dataset)
     features = split_dataset.features
     for feature_name, feature_value in features.items():
       if feature_name in fields:
@@ -101,7 +104,9 @@ def _hf_schema_to_schema(hf_dataset_dict: DatasetDict, split: Optional[str]) -> 
   # Add UUID to the Schema.
   fields[UUID_COLUMN] = Field(dtype=DataType.BINARY)
 
-  return SchemaInfo(data_schema=Schema(fields=fields), class_labels=class_labels)
+  return SchemaInfo(data_schema=Schema(fields=fields),
+                    class_labels=class_labels,
+                    num_items=num_items)
 
 
 class HuggingFaceDataset(Source[ShardInfo]):
@@ -125,15 +130,12 @@ class HuggingFaceDataset(Source[ShardInfo]):
       description='Load from local disk instead of the hub.', default=False)
 
   @override
-  async def process(
+  def process(
       self,
       output_dir: str,
-      shards_loader: Optional[ShardsLoader] = None,
       task_id: Optional[TaskId] = None,
   ) -> SourceProcessResult:
     """Process the source upload request."""
-    shards_loader = shards_loader or default_shards_loader(self)
-
     if self.load_from_disk:
       # Load from disk.
       hf_dataset_dict = {DEFAULT_LOCAL_SPLIT_NAME: load_from_disk(self.dataset_name)}
@@ -144,36 +146,18 @@ class HuggingFaceDataset(Source[ShardInfo]):
 
     schema_info = _hf_schema_to_schema(hf_dataset_dict, self.split)
 
-    shard_infos = [
-        ShardInfo(hf_dataset_name=self.dataset_name,
-                  split=self.split,
-                  schema_info=schema_info,
-                  output_dir=output_dir)
-    ]
-    shard_outs = await shards_loader(shard_infos)
-    filepaths = [shard_out.filepath for shard_out in shard_outs]
-    num_items = sum(shard_out.num_items for shard_out in shard_outs)
-    return SourceProcessResult(filepaths=filepaths,
-                               data_schema=schema_info.data_schema,
-                               images=None,
-                               num_items=num_items)
+    items = progress(_convert_to_items(hf_dataset_dict, schema_info.class_labels, self.split),
+                     task_id=task_id,
+                     estimated_len=schema_info.num_items)
 
-  @override
-  def process_shard(self, shard_info: ShardInfo) -> SourceShardOut:
-    """Process an input file shard. Each shard is processed in parallel by different workers."""
-    if self.load_from_disk:
-      # Load from disk.
-      hf_dataset_dict = {DEFAULT_LOCAL_SPLIT_NAME: load_from_disk(self.dataset_name)}
-    else:
-      hf_dataset_dict = load_dataset(self.dataset_name,
-                                     self.config_name,
-                                     num_proc=multiprocessing.cpu_count())
-    items = _convert_to_items(hf_dataset_dict, shard_info.schema_info.class_labels,
-                              shard_info.split)
     filepath, num_items = write_items_to_parquet(items=items,
-                                                 output_dir=shard_info.output_dir,
-                                                 schema=shard_info.schema_info.data_schema,
+                                                 output_dir=output_dir,
+                                                 schema=schema_info.data_schema,
                                                  filename_prefix=PARQUET_FILENAME_PREFIX,
                                                  shard_index=0,
                                                  num_shards=1)
-    return SourceShardOut(filepath=filepath, num_items=num_items)
+
+    return SourceProcessResult(filepaths=[filepath],
+                               data_schema=schema_info.data_schema,
+                               images=None,
+                               num_items=num_items)
