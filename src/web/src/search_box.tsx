@@ -3,20 +3,14 @@ import {Command} from 'cmdk';
 import * as React from 'react';
 import {Location, useLocation, useNavigate, useParams} from 'react-router-dom';
 import {Field} from '../fastapi_client';
-import {getEqualBins, NUM_AUTO_BINS} from './db';
-import {isOrdinal, LeafValue, Path, Schema, serializePath} from './schema';
+import {Path, Schema, serializePath} from './schema';
 import './search_box.css';
-import {
-  useGetDatasetsQuery,
-  useGetManifestQuery,
-  useGetStatsQuery,
-  useSelectGroupsQuery,
-} from './store/api_dataset';
-import {renderPath, roundNumber} from './utils';
+import {useGetDatasetsQuery, useGetManifestQuery} from './store/api_dataset';
+import {useTopValues} from './store/store';
+import {renderPath} from './utils';
 
 /** Time to debounce (ms). */
 const DEBOUNCE_TIME_MS = 100;
-const MAX_FILTER_VALUES_TO_RENDER = 100;
 
 type PageType = 'open-dataset' | 'add-filter' | 'add-filter-value';
 
@@ -123,7 +117,7 @@ export const SearchBox = () => {
       >
         <div className="flex">
           {pages.map((p) => (
-            <div key={`${p.type}_${p.name}`} cmdk-badge="" style={{margin: 'auto 2px'}}>
+            <div key={`${p.type}_${p.name}`} cmdk-badge="" className="truncate">
               {p.name}
             </div>
           ))}
@@ -138,6 +132,7 @@ export const SearchBox = () => {
         <Command.List>
           {isFocused && (
             <>
+              <div className="mt-4"></div>
               <Command.Empty>No results found.</Command.Empty>
               {isHome && <HomeMenu pushPage={pushPage} location={location} closeMenu={closeMenu} />}
               {activePage?.type === 'open-dataset' && <Datasets closeMenu={closeMenu} />}
@@ -277,55 +272,21 @@ function AddFilterValue({
   }
   const leafPath = page.metadata!.path;
   const field = page.metadata!.field;
-  const stats = useGetStatsQuery({namespace, datasetName, options: {leaf_path: leafPath}});
-  let values: LeafValue[] = [];
-  let skipSelectGroups = false;
-  let tooManyValues = false;
-  if (stats.currentData == null) {
-    skipSelectGroups = true;
-  } else if (stats.currentData.approx_count_distinct > MAX_FILTER_VALUES_TO_RENDER) {
-    skipSelectGroups = true;
-    tooManyValues = true;
-  }
-  if (isOrdinal(field.dtype!) && stats.currentData != null) {
-    tooManyValues = false;
-    skipSelectGroups = true;
-    const bins = getEqualBins(stats.currentData, leafPath, NUM_AUTO_BINS);
-    values = [...bins, bins[bins.length - 1]].map((b, i) => {
-      const num = roundNumber(b, 2).toLocaleString();
-      if (i === 0) {
-        return `< ${num}`;
-      }
-      if (i === bins.length) {
-        return `≥ ${num}`;
-      }
-      const prevNum = roundNumber(bins[i - 1], 2).toLocaleString();
-      return `${prevNum} - ${num}`;
-    });
-  }
-  const {isFetching, currentData: groupsResult} = useSelectGroupsQuery(
-    {
-      namespace,
-      datasetName,
-      options: {leaf_path: leafPath, limit: 0},
-    },
-    {skip: skipSelectGroups}
-  );
+  const topK = 100;
+  const {isFetching, tooManyDistinct, onlyTopK, values, dtypeNotSupported, statsResult} =
+    useTopValues({namespace, datasetName, leafPath, field, topK, vocabOnly: true});
+  const vocab = values.map(([v]) => v);
 
   if (isFetching) {
     return <SlSpinner />;
   }
 
-  if (groupsResult != null) {
-    values = groupsResult.map(([value]) => value);
-  }
-
   // Add the current input value to the list of values, and wrap it in quotes.
   if (inputValue.length > 0) {
-    values.unshift(`"${inputValue}"`);
+    vocab.unshift(`"${inputValue}"`);
   }
 
-  const items = values.map((value, i) => {
+  const items = vocab.map((value, i) => {
     return (
       <Item
         key={i}
@@ -340,8 +301,15 @@ function AddFilterValue({
   });
   return (
     <>
+      {onlyTopK && <Item disabled>Showing only the top {topK} values...</Item>}
       {items}
-      {tooManyValues && <Item disabled>Too many unique values to list...</Item>}
+      {tooManyDistinct && (
+        <Item disabled>
+          Too many distinct values ({statsResult?.approx_count_distinct.toLocaleString()}) to
+          list...
+        </Item>
+      )}
+      {dtypeNotSupported && <Item disabled>Dtype {field.dtype} is not supported...</Item>}
     </>
   );
 }
