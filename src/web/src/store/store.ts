@@ -231,7 +231,7 @@ export const store = configureStore({
     [datasetApi.reducerPath]: datasetApi.reducer,
   },
   middleware: (getDefaultMiddleware) =>
-    getDefaultMiddleware().concat([dbApi.middleware, datasetApi.middleware]),
+    getDefaultMiddleware().concat([dbApi.middleware, datasetApi.middleware, serverApi.middleware]),
   devTools: process.env.NODE_ENV !== 'production',
 });
 
@@ -262,7 +262,7 @@ export function useGetItem(
     isFetching,
     currentData: items,
     error,
-  } = useSelectRowsQuery({namespace, datasetName, options: {filters}});
+  } = useSelectRowsQuery({namespace, datasetName, options: {filters, limit: 1}});
   const item = items != null ? items[0] : null;
   return {isFetching, item, error};
 }
