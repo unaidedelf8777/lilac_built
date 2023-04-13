@@ -90,7 +90,7 @@ COMPARISON_TO_OP: dict[Comparison, str] = {
 class DuckDBSelectGroupsResult(SelectGroupsResult):
   """The result of a select groups query backed by DuckDB."""
 
-  def __init__(self, duckdb_result: duckdb.DuckDBPyRelation) -> None:
+  def __init__(self, duckdb_result: duckdb.DuckDBPyConnection) -> None:
     """Initialize the result."""
     self._duckdb_result = duckdb_result
 
@@ -99,9 +99,9 @@ class DuckDBSelectGroupsResult(SelectGroupsResult):
     return iter(cast(Iterable, self._duckdb_result.fetchall()))
 
   @override
-  def to_df(self) -> pd.DataFrame:
+  def df(self) -> pd.DataFrame:
     """Convert the result to a pandas DataFrame."""
-    return self._duckdb_result.to_df()
+    return self._duckdb_result.df()
 
 
 class ComputedColumn(BaseModel):
@@ -129,7 +129,7 @@ class SelectLeafsResult(BaseModel):
   class Config:
     arbitrary_types_allowed = True
 
-  duckdb_result: duckdb.DuckDBPyRelation
+  duckdb_result: duckdb.DuckDBPyConnection
   repeated_idxs_col: Optional[str]
   value_column: Optional[str]
 
@@ -254,7 +254,7 @@ class DatasetDuckDB(DatasetDB):
 
     with DebugTimer(f'"_select_leafs" over "{col.feature}"'):
       select_leafs_result = self._select_leafs(path=normalize_path(col.feature))
-      leafs_df = select_leafs_result.duckdb_result.to_df()
+      leafs_df = select_leafs_result.duckdb_result.df()
 
     keys = _get_keys_from_leafs(leafs_df=leafs_df, select_leafs_result=select_leafs_result)
     leaf_values = leafs_df[select_leafs_result.value_column]
@@ -288,7 +288,7 @@ class DatasetDuckDB(DatasetDB):
       # key + index to pass to the signal.
       with DebugTimer(f'"_select_leafs" over "{source_path}"'):
         select_leafs_result = self._select_leafs(path=source_path, only_keys=True)
-        leafs_df = select_leafs_result.duckdb_result.to_df()
+        leafs_df = select_leafs_result.duckdb_result.df()
 
       keys = _get_keys_from_leafs(leafs_df=leafs_df, select_leafs_result=select_leafs_result)
 
@@ -302,7 +302,7 @@ class DatasetDuckDB(DatasetDB):
       # For non-embedding bsaed signals, get the leaf values and indices.
       with DebugTimer(f'"_select_leafs" over "{source_path}"'):
         select_leafs_result = self._select_leafs(path=source_path)
-        leafs_df = select_leafs_result.duckdb_result.to_df()
+        leafs_df = select_leafs_result.duckdb_result.df()
 
       with DebugTimer(f'"compute" for signal "{signal.name}" over "{source_path}"'):
         signal_outputs = signal.compute(data=leafs_df[select_leafs_result.value_column])
@@ -635,7 +635,7 @@ class DatasetDuckDB(DatasetDB):
       {limit_query}
       {offset_query}
     """
-    query_results = cast(list, self._query(query).fetchall())
+    query_results = self._query(query).fetchall()
 
     def parse_row(row: list[Any]) -> Item:
       item = dict(zip(col_aliases, row))
@@ -703,16 +703,19 @@ class DatasetDuckDB(DatasetDB):
       filter_queries.append(filter_query)
     return 'WHERE ' + ' AND '.join(filter_queries)
 
-  def _query(self, query: str) -> duckdb.DuckDBPyRelation:
+  def _query(self, query: str) -> duckdb.DuckDBPyConnection:
     """Execute a query that returns a dataframe."""
+    # FastAPI is multi-threaded so we have to create a thread-specific connection cursor to allow
+    # these queries to be thread-safe.
+    local_con = self.con.cursor()
     if not DEBUG:
-      return self.con.query(query)
+      return local_con.execute(query)
 
     # Debug mode.
     log('Executing:')
     log(query)
     with DebugTimer('Query'):
-      result = self.con.query(query)
+      result = local_con.execute(query)
 
     return result
 
