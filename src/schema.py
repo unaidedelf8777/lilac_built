@@ -100,6 +100,15 @@ class EnrichmentType(str, Enum):
     return self.value
 
 
+def enrichment_supports_dtype(enrichment_type: EnrichmentType, dtype: DataType) -> bool:
+  """Returns True if the enrichment type supports the dtype."""
+  if enrichment_type == EnrichmentType.TEXT:
+    return dtype in (DataType.STRING, DataType.STRING_SPAN)
+  elif enrichment_type == EnrichmentType.IMAGE:
+    return dtype == DataType.BINARY
+  return False
+
+
 class Field(BaseModel):
   """Holds information for a field in the schema."""
   repeated_field: Optional['Field']
@@ -360,7 +369,7 @@ def dtype_to_arrow_dtype(dtype: DataType) -> pa.DataType:
     raise ValueError(f'Can not convert dtype "{dtype}" to arrow dtype')
 
 
-def schema_to_arrow_schema(schema: Schema) -> pa.Schema:
+def schema_to_arrow_schema(schema: Union[Schema, Field]) -> pa.Schema:
   """Convert our schema to arrow schema."""
   arrow_schema = cast(pa.Schema, _schema_to_arrow_schema_impl(schema))
   arrow_fields = {field.name: field.type for field in arrow_schema}

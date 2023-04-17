@@ -37,6 +37,7 @@ from .db_dataset import (
     DatasetManifest,
     FilterTuple,
     NamedBins,
+    SignalMap,
     SortOrder,
     StatsResult,
 )
@@ -386,6 +387,141 @@ class SelectRowsSuite:
             'flen': 10.0
         }]
     }]
+
+  def test_signal_transform(self, tmp_path: pathlib.Path, db_cls: Type[DatasetDB]) -> None:
+    db = make_db(db_cls,
+                 tmp_path,
+                 items=[{
+                     UUID_COLUMN: '31' * 16,
+                     'text': 'hello'
+                 }, {
+                     UUID_COLUMN: '32' * 16,
+                     'text': 'everybody'
+                 }],
+                 schema=Schema(fields={
+                     UUID_COLUMN: Field(dtype=DataType.BINARY),
+                     'text': Field(dtype=DataType.STRING),
+                 }))
+
+    signal_col = SignalMap(TestSignal(), 'text')
+    result = db.select_rows(columns=['text', signal_col])
+
+    assert list(result) == [{
+        UUID_COLUMN: '31' * 16,
+        'text': 'hello',
+        'test_signal(text)': {
+            'len': 5,
+            'flen': 5.0
+        }
+    }, {
+        UUID_COLUMN: '32' * 16,
+        'text': 'everybody',
+        'test_signal(text)': {
+            'len': 9,
+            'flen': 9.0
+        }
+    }]
+
+  def test_signal_transform_with_filters(self, tmp_path: pathlib.Path,
+                                         db_cls: Type[DatasetDB]) -> None:
+    db = make_db(db_cls,
+                 tmp_path,
+                 items=[{
+                     UUID_COLUMN: '31' * 16,
+                     'text': 'hello'
+                 }, {
+                     UUID_COLUMN: '32' * 16,
+                     'text': 'everybody'
+                 }],
+                 schema=Schema(fields={
+                     UUID_COLUMN: Field(dtype=DataType.BINARY),
+                     'text': Field(dtype=DataType.STRING),
+                 }))
+
+    signal_col = SignalMap(TestSignal(), 'text')
+    # Filter by source feature.
+    filters: list[FilterTuple] = [('text', Comparison.EQUALS, 'everybody')]
+    result = db.select_rows(columns=['text', signal_col], filters=filters)
+    assert list(result) == [{
+        UUID_COLUMN: '32' * 16,
+        'text': 'everybody',
+        'test_signal(text)': {
+            'len': 9,
+            'flen': 9.0
+        }
+    }]
+
+    # Filter by transformed feature.
+    filters = [(('test_signal(text)', 'len'), Comparison.LESS, 7)]
+    result = db.select_rows(columns=['text', signal_col], filters=filters)
+
+    assert list(result) == [{
+        UUID_COLUMN: '31' * 16,
+        'text': 'hello',
+        'test_signal(text)': {
+            'len': 5,
+            'flen': 5.0
+        }
+    }]
+
+    filters = [(('test_signal(text)', 'flen'), Comparison.GREATER, 6.0)]
+    result = db.select_rows(columns=['text', signal_col], filters=filters)
+
+    assert list(result) == [{
+        UUID_COLUMN: '32' * 16,
+        'text': 'everybody',
+        'test_signal(text)': {
+            'len': 9,
+            'flen': 9.0
+        }
+    }]
+
+  def test_signal_transform_with_embedding(self, tmp_path: pathlib.Path,
+                                           db_cls: Type[DatasetDB]) -> None:
+    db = make_db(db_cls=db_cls,
+                 tmp_path=tmp_path,
+                 items=[{
+                     UUID_COLUMN: '31' * 16,
+                     'text': 'hello.',
+                 }, {
+                     UUID_COLUMN: '32' * 16,
+                     'text': 'hello2.',
+                 }],
+                 schema=Schema(fields={
+                     UUID_COLUMN: Field(dtype=DataType.BINARY),
+                     'text': Field(dtype=DataType.STRING),
+                 }))
+
+    db.compute_embedding_index(embedding=TEST_EMBEDDING_NAME, column='text')
+
+    signal_col = SignalMap(TestEmbeddingSumSignal(embedding=TEST_EMBEDDING_NAME), column='text')
+    result = db.select_rows(columns=['text', signal_col])
+    expected_result = [{
+        UUID_COLUMN: '31' * 16,
+        'text': 'hello.',
+        'test_embedding_sum(text)': 1.0
+    }, {
+        UUID_COLUMN: '32' * 16,
+        'text': 'hello2.',
+        'test_embedding_sum(text)': 2.0
+    }]
+    assert list(result) == expected_result
+
+    # Select rows with alias.
+    signal_col = SignalMap(TestEmbeddingSumSignal(embedding=TEST_EMBEDDING_NAME),
+                           Column('text'),
+                           alias='emb_sum')
+    result = db.select_rows(columns=['text', signal_col])
+    expected_result = [{
+        UUID_COLUMN: '31' * 16,
+        'text': 'hello.',
+        'emb_sum': 1.0
+    }, {
+        UUID_COLUMN: '32' * 16,
+        'text': 'hello2.',
+        'emb_sum': 2.0
+    }]
+    assert list(result) == expected_result
 
   def test_source_joined_with_named_signal_column(self, tmp_path: pathlib.Path,
                                                   db_cls: Type[DatasetDB]) -> None:

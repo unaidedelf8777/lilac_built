@@ -7,6 +7,7 @@ from typing import Any, Iterable, Iterator, Optional, Sequence, Union, cast
 
 import duckdb
 import pandas as pd
+import pyarrow as pa
 from pydantic import BaseModel, validator
 from typing_extensions import override
 
@@ -27,11 +28,13 @@ from ..schema import (
     PathTuple,
     Schema,
     SourceManifest,
+    enrichment_supports_dtype,
     is_float,
     is_integer,
     is_ordinal,
     is_repeated_path_part,
     normalize_path,
+    schema_to_arrow_schema,
 )
 from ..signals.signal import Signal
 from ..signals.signal_registry import resolve_signal
@@ -46,7 +49,6 @@ from ..utils import (
 from . import db_dataset
 from .dataset_utils import (
     create_enriched_schema,
-    default_top_level_signal_col_name,
     make_enriched_items,
 )
 from .db_dataset import (
@@ -63,9 +65,11 @@ from .db_dataset import (
     NamedBins,
     SelectGroupsResult,
     SelectRowsResult,
+    SignalTransform,
     SortOrder,
     StatsResult,
     column_from_identifier,
+    default_top_level_signal_col_name,
 )
 
 DEBUG = os.environ['DEBUG'] == 'true' if 'DEBUG' in os.environ else False
@@ -91,7 +95,7 @@ COMPARISON_TO_OP: dict[Comparison, str] = {
 class DuckDBSelectGroupsResult(SelectGroupsResult):
   """The result of a select groups query backed by DuckDB."""
 
-  def __init__(self, duckdb_result: duckdb.DuckDBPyRelation) -> None:
+  def __init__(self, duckdb_result: duckdb.DuckDBPyConnection) -> None:
     """Initialize the result."""
     self._duckdb_result = duckdb_result
 
@@ -130,7 +134,7 @@ class SelectLeafsResult(BaseModel):
   class Config:
     arbitrary_types_allowed = True
 
-  duckdb_result: duckdb.DuckDBPyRelation
+  duckdb_result: duckdb.DuckDBPyConnection
   repeated_idxs_col: Optional[str]
   value_column: Optional[str]
 
@@ -440,9 +444,13 @@ class DatasetDuckDB(DatasetDB):
                              value_column=value_column_alias,
                              repeated_idxs_col=repeated_indices_col)
 
-  def _validate_filters(self, filters: Sequence[Filter]) -> None:
+  def _validate_filters(self, filters: Sequence[Filter], col_aliases: list[str]) -> None:
     manifest = self.manifest()
     for filter in filters:
+      if filter.path[0] in col_aliases:
+        # This is a filter on a column alias, which is always allowed.
+        continue
+
       current_field = Field(fields=manifest.data_schema.fields)
       for path_part in filter.path:
         if path_part == PATH_WILDCARD:
@@ -467,8 +475,26 @@ class DatasetDuckDB(DatasetDB):
   def _validate_columns(self, columns: Sequence[Column]) -> None:
     manifest = self.manifest()
     for column in columns:
+      if column.transform:
+        if isinstance(column.transform, SignalTransform):
+          path = column.feature
+
+          # Signal transforms must operate on a leaf field.
+          leaf = manifest.data_schema.leafs.get(path)
+          if not leaf or not leaf.dtype:
+            raise ValueError(f'Leaf "{path}" not found in dataset. '
+                             'Signal transforms must operate on a leaf field.')
+
+          # Signal transforms must have the same dtype as the leaf field.
+          signal = column.transform.signal
+          enrich_type = signal.enrichment_type
+
+          if not enrichment_supports_dtype(enrich_type, leaf.dtype):
+            raise ValueError(f'Leaf "{path}" has dtype "{leaf.dtype}" which is not supported '
+                             f'by "{signal.name}" with enrichment type "{enrich_type}".')
+
       current_field = Field(fields=manifest.data_schema.fields)
-      path = cast(Path, column.feature)
+      path = column.feature
       for path_part in path:
         if isinstance(path_part, int) or path_part.isdigit():
           raise ValueError(f'Unable to select path {path}. Selecting a specific index of '
@@ -608,40 +634,70 @@ class DatasetDuckDB(DatasetDB):
     self._validate_columns(cols)
 
     select_query, col_aliases = self._create_select(cols)
-    filters = self._normalize_filters(filters)
-    where_query = self._create_where(filters)
+    con = self.con.cursor()
+    query = con.sql(f'SELECT {select_query} FROM t').set_alias('r1')
 
-    # Sort.
-    sort_query = ''
+    transform_columns = [col for col in cols if col.transform]
+    # Run UDFs on the transformed columns.
+    for col in transform_columns:
+      if not isinstance(col.transform, SignalTransform):
+        raise ValueError(f'Unsupported transform: {col.transform}')
+      source_path = col.feature
+      signal = col.transform.signal
+
+      if signal.embedding_based:
+        # For embedding based signals, get the leaf keys and indices, creating a combined key for
+        # the key + index to pass to the signal.
+        select_leafs_result = self._select_leafs(path=source_path, only_keys=True)
+        leafs_df = select_leafs_result.duckdb_result.df()
+        keys = _get_keys_from_leafs(leafs_df=leafs_df, select_leafs_result=select_leafs_result)
+        signal_outs = signal.compute(
+            keys=keys,
+            get_embedding_index=(
+                lambda embedding, keys: self._embedding_indexer.get_embedding_index(
+                    column=source_path, embedding=embedding, keys=keys)))
+      else:
+        select_leafs_result = self._select_leafs(path=source_path)
+        leafs_df = select_leafs_result.duckdb_result.df()
+        signal_outs = signal.compute(data=leafs_df[select_leafs_result.value_column])
+
+      # Import the signal results into DuckDB and UUIDs.
+      signal_outs = [{
+          UUID_COLUMN: uuid,
+          col.alias: value
+      } for uuid, value in zip(leafs_df[UUID_COLUMN], signal_outs)]
+      schema = Schema(fields={
+          UUID_COLUMN: Field(dtype=DataType.BINARY),
+          col.alias: signal.fields(source_path)
+      })
+      table = pa.Table.from_pylist(signal_outs, schema=schema_to_arrow_schema(schema))
+      udf_query = con.from_arrow(table).set_alias('r2')
+
+      query = query.join(udf_query, f'r1.{UUID_COLUMN} = r2.{UUID_COLUMN}')
+      col_aliases.extend([UUID_COLUMN, col.alias])
+
+    filters = self._normalize_filters(filters, col_aliases)
+    filter_queries = self._create_where(filters)
+    if filter_queries:
+      query = query.filter(' AND '.join(filter_queries))
+
     if sort_by:
-      sort_by_query_parts = []
       for sort_by_alias in sort_by:
         if sort_by_alias not in col_aliases:
           raise ValueError(
               f'Column {sort_by_alias} is not defined as an alias in the given columns. '
               f'Available sort by aliases: {col_aliases}')
-        sort_by_query_parts.append(sort_by_alias)
 
       if not sort_order:
         raise ValueError(
             'Sort order is undefined but sort by is defined. Please define a sort_order')
-      sort_order_query = sort_order.value
 
-      sort_by_query = ', '.join(sort_by_query_parts)
-      sort_query = f'ORDER BY {sort_by_query} {sort_order_query}'
+      query = query.order(f'{", ".join(sort_by)} {sort_order.value}')
 
-    limit_query = f'LIMIT {limit}' if limit else ''
-    offset_query = f'OFFSET {offset}' if offset else ''
+    if limit:
+      query = query.limit(limit, offset or 0)
 
-    query = f"""
-      SELECT {select_query}
-      FROM t
-      {where_query}
-      {sort_query}
-      {limit_query}
-      {offset_query}
-    """
-    query_results = self._query(query).fetchall()
+    rows = query.fetchall()
 
     def parse_row(row: list[Any]) -> Item:
       item = dict(zip(col_aliases, row))
@@ -651,7 +707,7 @@ class DatasetDuckDB(DatasetDB):
         item[UUID_COLUMN] = bytes_val.hex()
       return item
 
-    item_rows = map(parse_row, query_results)
+    item_rows = map(parse_row, rows)
     return SelectRowsResult(item_rows)
 
   @override
@@ -664,14 +720,16 @@ class DatasetDuckDB(DatasetDB):
     aliases: list[str] = []
 
     for column in columns:
-      if isinstance(column.feature, Column):
-        raise ValueError('Transforms are not yet supported.')
+      if column.transform:
+        continue
       aliases.append(column.alias)
       select_queries.append(f'{self._path_to_col(column.feature)} AS "{column.alias}"')
 
     return ', '.join(select_queries), aliases
 
-  def _normalize_filters(self, filter_likes: Optional[Sequence[FilterLike]] = None) -> list[Filter]:
+  def _normalize_filters(self,
+                         filter_likes: Optional[Sequence[FilterLike]] = None,
+                         col_aliases: list[str] = []) -> list[Filter]:
     filter_likes = filter_likes or []
     filters: list[Filter] = []
     for filter in filter_likes:
@@ -681,16 +739,16 @@ class DatasetDuckDB(DatasetDB):
         if isinstance(path_tuple, str):
           path_tuple = (path_tuple,)
         elif isinstance(path_tuple, Column):
-          path_tuple = cast(PathTuple, path_tuple.feature)
+          path_tuple = path_tuple.feature
         filter = Filter(path=path_tuple, comparison=filter[1], value=filter[2])
       filters.append(filter)
 
-    self._validate_filters(filters)
+    self._validate_filters(filters, col_aliases)
     return filters
 
-  def _create_where(self, filters: list[Filter]) -> str:
+  def _create_where(self, filters: list[Filter]) -> list[str]:
     if not filters:
-      return ''
+      return []
     filter_queries: list[str] = []
     for filter in filters:
       col_name = self._path_to_col(filter.path)
@@ -707,21 +765,21 @@ class DatasetDuckDB(DatasetDB):
         filter_val = str(filter_val)
       filter_query = f'{col_name} {op} {filter_val}'
       filter_queries.append(filter_query)
-    return 'WHERE ' + ' AND '.join(filter_queries)
+    return filter_queries
 
-  def _query(self, query: str) -> duckdb.DuckDBPyRelation:
+  def _query(self, query: str) -> duckdb.DuckDBPyConnection:
     """Execute a query that returns a dataframe."""
     # FastAPI is multi-threaded so we have to create a thread-specific connection cursor to allow
     # these queries to be thread-safe.
     local_con = self.con.cursor()
     if not DEBUG:
-      return local_con.query(query)
+      return local_con.execute(query)
 
     # Debug mode.
     log('Executing:')
     log(query)
     with DebugTimer('Query'):
-      result = local_con.query(query)
+      result = local_con.execute(query)
 
     return result
 
