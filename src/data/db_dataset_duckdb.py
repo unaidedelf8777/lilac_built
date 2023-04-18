@@ -14,7 +14,7 @@ from typing_extensions import override
 from ..constants import data_path
 from ..embeddings.embedding_index import EmbeddingIndexer
 from ..embeddings.embedding_index_disk import EmbeddingIndexerDisk
-from ..embeddings.embedding_registry import EmbeddingId
+from ..embeddings.embedding_registry import EmbeddingId, get_embedding_cls
 from ..schema import (
     MANIFEST_FILENAME,
     PATH_WILDCARD,
@@ -252,7 +252,13 @@ class DatasetDuckDB(DatasetDB):
     raise NotImplementedError('count is not yet implemented for DuckDB.')
 
   @override
-  def compute_embedding_index(self, embedding: EmbeddingId, column: ColumnId) -> None:
+  def compute_embedding_index(self,
+                              embedding: EmbeddingId,
+                              column: ColumnId,
+                              task_id: Optional[TaskId] = None) -> None:
+    if isinstance(embedding, str):
+      embedding = get_embedding_cls(embedding)()
+
     col = column_from_identifier(column)
     if isinstance(col.feature, Column):
       raise ValueError(f'Cannot compute a signal for {col} as it is not a leaf feature.')
@@ -267,7 +273,8 @@ class DatasetDuckDB(DatasetDB):
     self._embedding_indexer.compute_embedding_index(column=col.feature,
                                                     embedding=embedding,
                                                     keys=keys,
-                                                    data=leaf_values)
+                                                    data=leaf_values,
+                                                    task_id=task_id)
 
   @override
   def compute_signal_column(self,

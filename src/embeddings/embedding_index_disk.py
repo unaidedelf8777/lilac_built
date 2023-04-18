@@ -1,4 +1,5 @@
 """An embedding indexer that stores the embedding index on disk."""
+import math
 import os
 import pathlib
 from typing import Iterable, Optional, Union
@@ -8,9 +9,10 @@ import pandas as pd
 from typing_extensions import override
 
 from ..schema import Path, RichData, path_to_alias
-from ..utils import file_exists, open_file
+from ..tasks import TaskId, progress
+from ..utils import chunks, file_exists, open_file
 from .embedding_index import EmbeddingIndex, EmbeddingIndexer
-from .embedding_registry import EmbeddingId, get_embed_fn
+from .embedding_registry import EmbeddingId, get_embedding_cls
 
 NP_INDEX_KEYS_KWD = 'keys'
 NP_EMBEDDINGS_KWD = 'embeddings'
@@ -27,7 +29,10 @@ class EmbeddingIndexerDisk(EmbeddingIndexer):
                           column: Path,
                           embedding: EmbeddingId,
                           keys: Optional[Iterable[bytes]] = None) -> EmbeddingIndex:
-    embedding_name, _ = get_embed_fn(embedding)
+    if isinstance(embedding, str):
+      embedding_name = embedding
+    else:
+      embedding_name = embedding.name
 
     index_filename = embedding_index_filename(column, embedding_name)
     index_path = os.path.join(self.dataset_path, index_filename)
@@ -60,9 +65,18 @@ class EmbeddingIndexerDisk(EmbeddingIndexer):
     return EmbeddingIndex(path=index_path, embeddings=embeddings)
 
   @override
-  def compute_embedding_index(self, column: Path, embedding: EmbeddingId, keys: Iterable[bytes],
-                              data: Iterable[RichData]) -> None:
-    embedding_name, embed_fn = get_embed_fn(embedding)
+  def compute_embedding_index(self,
+                              column: Path,
+                              embedding: EmbeddingId,
+                              keys: Iterable[bytes],
+                              data: Iterable[RichData],
+                              task_id: Optional[TaskId] = None) -> None:
+    if isinstance(embedding, str):
+      embed_fn = get_embedding_cls(embedding)()
+    else:
+      embed_fn = embedding
+
+    embedding_name = embed_fn.name
 
     index_filename = embedding_index_filename(column, embedding_name)
     index_path = os.path.join(self.dataset_path, index_filename)
@@ -71,12 +85,22 @@ class EmbeddingIndexerDisk(EmbeddingIndexer):
       # The embedding index has already been computed.
       return
 
-    embeddings = embed_fn(data)
     # Write the embedding index and the ordered UUID column to disk so they can be joined later.
     if isinstance(keys, pd.Series):
       np_keys = keys.to_numpy().astype('bytes')
     else:
       np_keys = np.array(keys, dtype=bytes)
+
+    batches = chunks(data, size=embed_fn.batch_size)
+
+    def _compute_embeddings(batches: Iterable[list[RichData]]) -> Iterable[np.ndarray]:
+      for batch in batches:
+        yield embed_fn(batch)
+
+    batched_embeddings = progress(_compute_embeddings(batches),
+                                  task_id=task_id,
+                                  estimated_len=math.ceil(len(np_keys) / embed_fn.batch_size))
+    embeddings = np.concatenate(list(batched_embeddings))
 
     with open_file(index_path, 'wb') as f:
       np.savez(f, **{NP_INDEX_KEYS_KWD: np_keys, NP_EMBEDDINGS_KWD: embeddings})

@@ -36,6 +36,7 @@ import {
   useSelectGroupsQuery,
   useSelectRowsQuery,
 } from './api_dataset';
+import {embeddingApi} from './api_embeddings';
 import {signalApi} from './api_signal';
 import {fastAPIBaseQuery} from './api_utils';
 
@@ -254,6 +255,7 @@ export const store = configureStore({
     [serverApi.reducerPath]: serverApi.reducer,
     [datasetApi.reducerPath]: datasetApi.reducer,
     [signalApi.reducerPath]: signalApi.reducer,
+    [embeddingApi.reducerPath]: embeddingApi.reducer,
   },
   middleware: (getDefaultMiddleware) =>
     getDefaultMiddleware().concat([
@@ -261,6 +263,7 @@ export const store = configureStore({
       datasetApi.middleware,
       signalApi.middleware,
       serverApi.middleware,
+      embeddingApi.middleware,
       rtkQueryErrorLogger,
     ]),
   devTools: process.env.NODE_ENV !== 'production',
