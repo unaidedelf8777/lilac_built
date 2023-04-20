@@ -5,13 +5,13 @@ from typing import Any, ClassVar, Iterable, Optional, Union
 
 from pydantic import BaseModel, validator
 
-from ..embeddings.embedding_index import GetEmbeddingIndexFn
 from ..embeddings.embedding_registry import (
     Embedding,
     EmbeddingId,
     get_embedding_cls,
     resolve_embedding,
 )
+from ..embeddings.vector_store import VectorStore
 from ..schema import EnrichmentType, Field, Path, RichData, SignalOut
 
 
@@ -64,17 +64,16 @@ class Signal(abc.ABC, BaseModel):
     pass
 
   @abc.abstractmethod
-  def compute(
-      self,
-      data: Optional[Iterable[RichData]] = None,
-      keys: Optional[Iterable[str]] = None,
-      get_embedding_index: Optional[GetEmbeddingIndexFn] = None) -> Iterable[Optional[SignalOut]]:
+  def compute(self,
+              data: Optional[Iterable[RichData]] = None,
+              keys: Optional[Iterable[str]] = None,
+              vector_store: Optional[VectorStore] = None) -> Iterable[Optional[SignalOut]]:
     """Compute the signal for an iterable of row-keyed documents or images.
 
     Args:
       data: An iterable of rich data to compute the signal over
       keys: An iterable of row-uuids. These are used to lookup pre-computed embeddings.
-      get_embedding_index: A method to get embeddings from a set of keys.
+      vector_store: The vector store to lookup pre-computed embeddings.
 
     Returns
       An iterable of items. The signal should return "None" if the signal is sparse for the input.

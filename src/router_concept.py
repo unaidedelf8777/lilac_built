@@ -9,11 +9,18 @@ from .concepts.concept import Concept, ConceptModel
 from .concepts.db_concept import (
     DISK_CONCEPT_DB,
     DISK_CONCEPT_MODEL_DB,
+    ConceptInfo,
     ConceptUpdate,
 )
 from .router_utils import RouteErrorHandler
 
 router = APIRouter(route_class=RouteErrorHandler)
+
+
+@router.get('/', response_model_exclude_none=True)
+def get_concepts() -> list[ConceptInfo]:
+  """List the concepts."""
+  return DISK_CONCEPT_DB.list()
 
 
 @router.get('/{namespace}/{concept_name}', response_model_exclude_none=True)

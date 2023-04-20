@@ -3,8 +3,7 @@ import functools
 import itertools
 import os
 import re
-from collections.abc import Iterable
-from typing import Any, Iterator, Optional, Sequence, cast
+from typing import Any, Iterable, Iterator, Optional, Sequence, Type, cast
 
 import duckdb
 import numpy as np
@@ -17,6 +16,8 @@ from ..constants import data_path
 from ..embeddings.embedding_index import EmbeddingIndexer
 from ..embeddings.embedding_index_disk import EmbeddingIndexerDisk
 from ..embeddings.embedding_registry import EmbeddingId, get_embedding_cls
+from ..embeddings.vector_store import VectorStore
+from ..embeddings.vector_store_numpy import NumpyVectorStore
 from ..schema import (
     MANIFEST_FILENAME,
     PATH_WILDCARD,
@@ -155,13 +156,17 @@ class DuckDBTableInfo(BaseModel):
   computed_columns: list[ComputedColumn]
 
 
+ColumnEmbedding = tuple[PathTuple, str]
+
+
 class DatasetDuckDB(DatasetDB):
   """The DuckDB implementation of the dataset database."""
 
   def __init__(self,
                namespace: str,
                dataset_name: str,
-               embedding_indexer: Optional[EmbeddingIndexer] = None):
+               embedding_indexer: Optional[EmbeddingIndexer] = None,
+               vector_store_cls: Type[VectorStore] = NumpyVectorStore):
     super().__init__(namespace, dataset_name)
 
     self.dataset_path = get_dataset_output_dir(data_path(), namespace, dataset_name)
@@ -176,6 +181,10 @@ class DatasetDuckDB(DatasetDB):
       self._embedding_indexer: EmbeddingIndexer = EmbeddingIndexerDisk(self.dataset_path)
     else:
       self._embedding_indexer = embedding_indexer
+
+    # Maps a column path and embedding to the vector store. This is lazily generated as needed.
+    self._col_embedding_stores: dict[ColumnEmbedding, VectorStore] = {}
+    self.vector_store_cls = vector_store_cls
 
   def _create_view(self, view_name: str, files: list[str]) -> None:
     parquet_files = [os.path.join(self.dataset_path, filename) for filename in files]
@@ -261,6 +270,24 @@ class DatasetDuckDB(DatasetDB):
     """Count the number of rows."""
     raise NotImplementedError('count is not yet implemented for DuckDB.')
 
+  def _get_vector_store(self, path: PathTuple, embedding: EmbeddingId) -> VectorStore:
+    if isinstance(embedding, str):
+      embedding_key = embedding
+    else:
+      embedding_key = embedding.__class__.__name__
+
+    store_key: ColumnEmbedding = (path, embedding_key)
+    if store_key not in self._col_embedding_stores:
+      # Get the embedding index for the column and embedding.
+      embedding_index = self._embedding_indexer.get_embedding_index(path, embedding)
+      # Get all the embeddings and pass it to the vector store.
+      vector_store = self.vector_store_cls()
+      vector_store.add(embedding_index.keys, embedding_index.embeddings)
+      # Cache the vector store.
+      self._col_embedding_stores[store_key] = vector_store
+
+    return self._col_embedding_stores[store_key]
+
   @override
   def compute_embedding_index(self,
                               embedding: EmbeddingId,
@@ -315,12 +342,13 @@ class DatasetDuckDB(DatasetDB):
 
       keys = _get_keys_from_leafs(leafs_df=leafs_df, select_leafs_result=select_leafs_result)
 
+      if signal.embedding is None:
+        raise ValueError('`Signal.embedding` must be defined for embedding-based signals.')
+
+      vector_store = self._get_vector_store(column.feature, signal.embedding)
+
       with DebugTimer(f'"compute" for embedding signal "{signal.name}" over "{source_path}"'):
-        signal_outputs = signal.compute(
-            keys=keys,
-            get_embedding_index=(
-                lambda embedding, keys: self._embedding_indexer.get_embedding_index(
-                    column=source_path, embedding=embedding, keys=keys)))
+        signal_outputs = signal.compute(keys=keys, vector_store=vector_store)
     else:
       # For non-embedding bsaed signals, get the leaf values and indices.
       with DebugTimer(f'"_select_leafs" over "{source_path}"'):
@@ -702,14 +730,14 @@ class DatasetDuckDB(DatasetDB):
       input = df[signal_column]
 
       if signal.embedding_based:
+        if signal.embedding is None:
+          raise ValueError('`Signal.embedding` must be defined for embedding-based signals.')
+
         # For embedding based signals, get the leaf keys and indices, creating a combined key for
         # the key + index to pass to the signal.
         flat_keys = flatten_keys(df[UUID_COLUMN], input)
-        flat_output = signal.compute(
-            keys=flat_keys,
-            get_embedding_index=(
-                lambda embedding, keys: self._embedding_indexer.get_embedding_index(
-                    column=transform_col.feature, embedding=embedding, keys=keys)))
+        vector_store = self._get_vector_store(transform_col.feature, signal.embedding)
+        flat_output = signal.compute(keys=flat_keys, vector_store=vector_store)
       else:
         flat_input = cast(Iterable[RichData], flatten(input))
         flat_output = signal.compute(flat_input)

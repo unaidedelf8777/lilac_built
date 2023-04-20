@@ -2,6 +2,7 @@
 /* tslint:disable */
 /* eslint-disable */
 import type { Concept } from '../models/Concept';
+import type { ConceptInfo } from '../models/ConceptInfo';
 import type { ConceptUpdate } from '../models/ConceptUpdate';
 import type { ScoreBody } from '../models/ScoreBody';
 import type { ScoreResponse } from '../models/ScoreResponse';
@@ -11,6 +12,19 @@ import { OpenAPI } from '../core/OpenAPI';
 import { request as __request } from '../core/request';
 
 export class ConceptsService {
+
+    /**
+     * Get Concepts
+     * List the concepts.
+     * @returns ConceptInfo Successful Response
+     * @throws ApiError
+     */
+    public static getConcepts(): CancelablePromise<Array<ConceptInfo>> {
+        return __request(OpenAPI, {
+            method: 'GET',
+            url: '/api/v1/concepts/',
+        });
+    }
 
     /**
      * Get Concept

@@ -1,11 +1,19 @@
-import {SlButton, SlIcon, SlOption, SlSelect, SlSpinner} from '@shoelace-style/shoelace/dist/react';
+import {
+  SlAlert,
+  SlButton,
+  SlIcon,
+  SlOption,
+  SlSelect,
+  SlSpinner,
+} from '@shoelace-style/shoelace/dist/react';
 import {Command} from 'cmdk';
 import {JSONSchema7} from 'json-schema';
 import * as React from 'react';
 import {Location, useLocation, useNavigate, useParams} from 'react-router-dom';
-import {EmbeddingInfo, EnrichmentType, Field, SignalInfo} from '../fastapi_client';
+import {ConceptInfo, EmbeddingInfo, EnrichmentType, Field, SignalInfo} from '../fastapi_client';
 import {Path, Schema, serializePath} from './schema';
 import './search_box.css';
+import {useGetConceptsQuery} from './store/api_concept';
 import {
   useComputeEmbeddingIndexMutation,
   useComputeSignalColumnMutation,
@@ -20,16 +28,8 @@ import {renderPath, renderQuery, useClickOutside} from './utils';
 /** Time to debounce (ms). */
 const DEBOUNCE_TIME_MS = 100;
 
-type PageType =
-  | 'open-dataset'
-  | 'add-filter'
-  | 'add-filter-value'
-  | 'compute-signal'
-  | 'compute-signal-setup'
-  | 'compute-embedding-index'
-  | 'compute-embedding-index-setup';
-
-type PageMetadata = {
+type PageType = keyof PageMetadata;
+interface PageMetadata {
   'open-dataset': Record<string, never>;
   'add-filter': Record<string, never>;
   'add-filter-value': {path: Path; field: Field};
@@ -37,6 +37,29 @@ type PageMetadata = {
   'compute-signal-setup': {signal: SignalInfo};
   'compute-embedding-index': Record<string, never>;
   'compute-embedding-index-setup': {embedding: EmbeddingInfo};
+  'edit-concept': Record<string, never>;
+  'edit-concept-embedding': {concept: ConceptInfo};
+  'edit-concept-column': {concept: ConceptInfo; embedding: EmbeddingInfo};
+  'edit-concept-accept': {
+    concept: ConceptInfo;
+    embedding: EmbeddingInfo;
+    column: Path;
+    description: string;
+  };
+}
+
+const PAGE_SEARCH_TITLE: Record<PageType, string> = {
+  'open-dataset': 'Select a dataset',
+  'add-filter': 'Add filter',
+  'add-filter-value': 'Add filter value',
+  'compute-signal': 'Compute signal',
+  'compute-signal-setup': 'Compute signal',
+  'compute-embedding-index': 'Compute embedding index',
+  'compute-embedding-index-setup': 'Compute embedding index',
+  'edit-concept': 'Select a concept',
+  'edit-concept-embedding': 'Select an embedding',
+  'edit-concept-column': 'Select a column',
+  'edit-concept-accept': '',
 };
 
 interface Page<T extends PageType = PageType> {
@@ -142,19 +165,21 @@ export const SearchBox = () => {
             value={inputValue}
             ref={inputRef}
             style={{width: 'auto', flexGrow: 1}}
-            placeholder="Search and run commands"
+            placeholder={
+              activePage?.type == null
+                ? 'Search and run commands'
+                : PAGE_SEARCH_TITLE[activePage?.type]
+            }
             onValueChange={setInputValue}
           />
         </div>
         <Command.List>
           {isFocused && (
             <>
-              <div className="mt-4"></div>
-              {activePage?.type !== 'compute-signal-setup' && (
-                <Command.Empty>No results found.</Command.Empty>
-              )}
+              <div className="mt-2"></div>
+              {activePage?.type == null && <Command.Empty>No results found.</Command.Empty>}
               {isHome && <HomeMenu pushPage={pushPage} location={location} closeMenu={closeMenu} />}
-              {activePage?.type === 'open-dataset' && <Datasets closeMenu={closeMenu} />}
+              {activePage?.type == 'open-dataset' && <Datasets closeMenu={closeMenu} />}
               {activePage?.type == 'add-filter' && <AddFilter pushPage={pushPage} />}
               {activePage?.type == 'add-filter-value' && (
                 <AddFilterValue
@@ -163,12 +188,71 @@ export const SearchBox = () => {
                   page={activePage as Page<'add-filter-value'>}
                 />
               )}
+              {/*
+                  Edit a concept.
+                  Concept => Embedding => Column setup
+               */}
+              {activePage?.type == 'edit-concept' && (
+                <Concepts
+                  onSelect={(concept) => {
+                    pushPage({
+                      type: 'edit-concept-embedding',
+                      name: concept.name,
+                      metadata: {concept},
+                    });
+                  }}
+                />
+              )}
+              {activePage?.type == 'edit-concept-embedding' && (
+                <Embeddings
+                  onSelect={(embedding) => {
+                    pushPage({
+                      type: 'edit-concept-column',
+                      name: embedding.name,
+                      metadata: {
+                        concept: (activePage as Page<'edit-concept-embedding'>)?.metadata?.concept,
+                        embedding,
+                      },
+                    });
+                  }}
+                />
+              )}
+              {activePage?.type == 'edit-concept-column' && (
+                <Columns
+                  enrichmentType="text"
+                  onSelect={(path) => {
+                    pushPage({
+                      type: 'edit-concept-accept',
+                      name: renderPath(path),
+                      metadata: {
+                        concept: (activePage as Page<'edit-concept-column'>).metadata!.concept,
+                        embedding: (activePage as Page<'edit-concept-column'>).metadata!.embedding,
+                        column: path,
+                        description: '',
+                      },
+                    });
+                  }}
+                ></Columns>
+              )}
+              {activePage?.type == 'edit-concept-accept' && (
+                <EditConceptAccept
+                  page={activePage as Page<'edit-concept-accept'>}
+                ></EditConceptAccept>
+              )}
               {activePage?.type == 'compute-signal' && <ComputeSignal pushPage={pushPage} />}
               {activePage?.type == 'compute-signal-setup' && (
                 <ComputeSignalSetup page={activePage as Page<'compute-signal-setup'>} />
               )}
               {activePage?.type == 'compute-embedding-index' && (
-                <ComputeEmbeddingIndex pushPage={pushPage} />
+                <Embeddings
+                  onSelect={(embedding) => {
+                    pushPage({
+                      type: 'compute-embedding-index-setup',
+                      name: embedding.name,
+                      metadata: {embedding},
+                    });
+                  }}
+                />
               )}
               {activePage?.type == 'compute-embedding-index-setup' && (
                 <ComputeEmbeddingIndexSetup
@@ -234,9 +318,13 @@ function HomeMenu({
 
       {/* Concepts */}
       <Command.Group heading="Concepts">
-        <Item>
+        <Item
+          onSelect={() => {
+            pushPage({type: 'edit-concept', name: 'Edit concept'});
+          }}
+        >
           <SlIcon className="text-xl" name="stars" />
-          Open concept
+          Edit concept
         </Item>
         <Item>
           <SlIcon className="text-xl" name="plus-lg" />
@@ -583,8 +671,7 @@ function ComputeEmbeddingIndexSetup({page}: {page: Page<'compute-embedding-index
     </>
   );
 }
-
-function ComputeEmbeddingIndex({pushPage}: {pushPage: (page: Page) => void}) {
+function Embeddings({onSelect}: {onSelect: (embedding: EmbeddingInfo) => void}) {
   const {namespace, datasetName} = useParams<{namespace: string; datasetName: string}>();
   if (namespace == null || datasetName == null) {
     throw new Error('Invalid route');
@@ -596,16 +683,7 @@ function ComputeEmbeddingIndex({pushPage}: {pushPage: (page: Page) => void}) {
         {embeddings.map((embedding) => {
           const jsonSchema = embedding.json_schema as JSONSchema7;
           return (
-            <Item
-              key={embedding.name}
-              onSelect={() => {
-                pushPage({
-                  type: 'compute-embedding-index-setup',
-                  name: embedding.name,
-                  metadata: {embedding},
-                });
-              }}
-            >
+            <Item key={embedding.name} onSelect={() => onSelect(embedding)}>
               <div className="flex w-full justify-between">
                 <div className="truncate">{embedding.name}</div>
                 <div className="truncate">{jsonSchema.description}</div>
@@ -616,6 +694,137 @@ function ComputeEmbeddingIndex({pushPage}: {pushPage: (page: Page) => void}) {
       </>
     );
   });
+}
+
+function Concepts({onSelect}: {onSelect: (concept: ConceptInfo) => void}) {
+  const {namespace, datasetName} = useParams<{namespace: string; datasetName: string}>();
+  if (namespace == null || datasetName == null) {
+    throw new Error('Invalid route');
+  }
+  const query = useGetConceptsQuery();
+  return renderQuery(query, (concepts) => {
+    return (
+      <>
+        {concepts.map((concept) => {
+          return (
+            <Item key={concept.name} onSelect={() => onSelect(concept)}>
+              <div className="flex w-full justify-between">
+                <div className="truncate">
+                  {concept.namespace}/{concept.name}
+                </div>
+                <div className="truncate">{/* Future description here */}</div>
+              </div>
+            </Item>
+          );
+        })}
+      </>
+    );
+  });
+}
+
+function Columns({
+  enrichmentType,
+  onSelect,
+}: {
+  enrichmentType: EnrichmentType;
+  onSelect: (path: Path) => void;
+}) {
+  const {namespace, datasetName} = useParams<{namespace: string; datasetName: string}>();
+  if (namespace == null || datasetName == null) {
+    throw new Error('Invalid route');
+  }
+
+  const query = useGetManifestQuery({
+    namespace,
+    datasetName,
+  });
+  return renderQuery(query, (webManifest) => {
+    const schema = new Schema(webManifest.dataset_manifest.data_schema);
+    const leafs = getLeafsByEnrichmentType(schema.leafs, enrichmentType);
+    return (
+      <>
+        {leafs.map(([path, field], i) => {
+          return (
+            <Item key={i} onSelect={() => onSelect(path)}>
+              <div className="flex w-full justify-between">
+                <div className="truncate">{renderPath(path)}</div>
+                <div className="truncate">{field.dtype}</div>
+              </div>
+            </Item>
+          );
+        })}
+      </>
+    );
+  });
+}
+
+function EditConceptAccept({page}: {page: Page<'edit-concept-accept'>}) {
+  const {namespace, datasetName} = useParams<{namespace: string; datasetName: string}>();
+  if (namespace == null || datasetName == null) {
+    throw new Error('Invalid route');
+  }
+
+  const [
+    computeEmbedding,
+    {isLoading: isComputeEmbeddingLoading, isSuccess: isComputeEmbeddingSuccess},
+  ] = useComputeEmbeddingIndexMutation();
+  const [taskId, setTaskId] = React.useState<string | null>(null);
+
+  return (
+    <>
+      <SlAlert open variant="warning">
+        <SlIcon slot="icon" name="exclamation-triangle" />
+        <div className="flex flex-col">
+          <div className="flex flex-row text-xs text-gray-500">
+            <div className="mr-2">Embedding:</div>
+            <div>{page.metadata!.embedding!.name}</div>
+          </div>
+          <div className="text-xs text-gray-500">
+            <div className="flex flex-row text-xs text-gray-500">
+              <div className="mr-2">Column:</div>
+              <div>{renderPath(page.metadata!.column!)}</div>
+            </div>
+          </div>
+          <div className="mt-2 text-xs">
+            <b>This may be expensive!</b>
+          </div>
+        </div>
+      </SlAlert>
+      <div className="flex flex-col">
+        <SlButton
+          onClick={async () => {
+            const response = await computeEmbedding({
+              namespace,
+              datasetName,
+              options: {
+                leaf_path: page.metadata!.column!,
+                embedding: {embedding_name: page.metadata?.embedding.name},
+              },
+            }).unwrap();
+            setTaskId(response.task_id);
+          }}
+          outline
+          variant="success"
+          className="mr-4 mt-1 w-16"
+        >
+          Compute
+        </SlButton>
+      </div>
+      <div>{isComputeEmbeddingLoading && <SlSpinner></SlSpinner>}</div>
+      <div>
+        {isComputeEmbeddingSuccess && (
+          <>
+            <SlSpinner></SlSpinner>
+            <br />
+            <div className="mt-2 text-gray-500">
+              <p>Loading dataset with task_id "{taskId}".</p>
+              <p>When the task is complete,</p>
+            </div>
+          </>
+        )}
+      </div>
+    </>
+  );
 }
 
 function Item({
