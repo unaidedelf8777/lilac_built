@@ -1,8 +1,5 @@
-"""Pydantic models for data, stored on GCS."""
+"""Server constants."""
 import os
-
-DATA_JSON_FILENAME = 'data.json'
-EMBEDDINGS_FILENAME = 'embeddings.npy'
 
 
 def data_path() -> str:
