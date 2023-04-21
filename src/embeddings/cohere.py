@@ -6,6 +6,7 @@ from typing import Iterable
 import cohere
 import numpy as np
 from sklearn.preprocessing import normalize
+from typing_extensions import override
 
 from ..schema import EnrichmentType, RichData
 from .embedding_registry import Embedding
@@ -26,6 +27,7 @@ class Cohere(Embedding):
   # Cohere only accepts 96 inputs at a time.
   batch_size = 96
 
+  @override
   def __call__(self, data: Iterable[RichData]) -> np.ndarray:
     """Call the embedding function."""
     return normalize(np.array(_cohere().embed(list(data),

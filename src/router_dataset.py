@@ -73,7 +73,7 @@ class WebManifest(BaseModel):
   dataset_manifest: DatasetManifest
 
 
-@router.get('/{namespace}/{dataset_name}', response_model_exclude_unset=True)
+@router.get('/{namespace}/{dataset_name}')
 def get_manifest(namespace: str, dataset_name: str) -> WebManifest:
   """Get the web manifest for the dataset."""
   dataset_db = get_dataset_db(namespace, dataset_name)

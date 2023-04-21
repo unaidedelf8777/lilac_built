@@ -1,9 +1,8 @@
 """Embedding registry."""
-import abc
-from typing import Any, ClassVar, Iterable, Type, Union
+from typing import ClassVar, Iterable, Optional, Type, Union
 
 import numpy as np
-from pydantic import BaseModel
+from pydantic import BaseModel, validator
 
 from ..schema import EnrichmentType, RichData
 
@@ -21,23 +20,26 @@ class Embedding(BaseModel):
   # The embedding_name will get populated in init automatically from the class name so it gets
   # serialized and the embedding author doesn't have to define both the static property and the
   # field.
-  embedding_name: str = 'embedding_base'
+  embedding_name: Optional[str]
 
   class Config:
     underscore_attrs_are_private = True
 
-  def __init__(self, *args: Any, **kwargs: Any) -> None:
-    super().__init__(*args, **kwargs)
+  @validator('embedding_name', always=True)
+  def validate_embedding_name(cls, embedding_name: str) -> str:
+    """Return the static name when the embedding name hasn't yet been set."""
+    # When it's already been set from JSON, just return it.
+    if embedding_name:
+      return embedding_name
 
-    if 'name' not in self.__class__.__dict__:
+    if 'name' not in cls.__dict__:
       raise ValueError('Embedding attribute "name" must be defined.')
 
-    self.embedding_name = self.__class__.name
+    return cls.name
 
-  @abc.abstractmethod
   def __call__(self, data: Iterable[RichData]) -> np.ndarray:
     """Call the embedding function."""
-    pass
+    raise NotImplementedError
 
 
 EmbeddingId = Union[str, Embedding]

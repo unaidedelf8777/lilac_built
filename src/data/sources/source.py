@@ -1,9 +1,9 @@
 """Interface for implementing a source."""
 
 import abc
-from typing import Any, ClassVar, Optional
+from typing import ClassVar, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, validator
 
 from ...schema import ImageInfo, Schema
 from ...tasks import TaskId
@@ -24,18 +24,22 @@ class Source(abc.ABC, BaseModel):
 
   # The source_name will get populated in init automatically from the class name so it gets
   # serialized and the source author doesn't have to define both the static property and the field.
-  source_name: str = 'source_base'
+  source_name: Optional[str]
 
   class Config:
     underscore_attrs_are_private = True
 
-  def __init__(self, *args: Any, **kwargs: Any) -> None:
-    super().__init__(*args, **kwargs)
+  @validator('source_name', always=True)
+  def validate_source_name(cls, source_name: str) -> str:
+    """Return the static name when the source_name name hasn't yet been set."""
+    # When it's already been set from JSON, just return it.
+    if source_name:
+      return source_name
 
-    if 'name' not in self.__class__.__dict__:
-      raise ValueError('Signal attribute "name" must be defined.')
+    if 'name' not in cls.__dict__:
+      raise ValueError('Source attribute "name" must be defined.')
 
-    self.source_name = self.__class__.name
+    return cls.name
 
   @abc.abstractmethod
   def process(
