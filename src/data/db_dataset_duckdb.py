@@ -679,7 +679,7 @@ class DatasetDuckDB(DatasetDB):
   def select_rows(self,
                   columns: Optional[Sequence[ColumnId]] = None,
                   filters: Optional[Sequence[FilterLike]] = None,
-                  sort_by: Optional[Sequence[str]] = None,
+                  sort_by: Optional[Sequence[Path]] = None,
                   sort_order: Optional[SortOrder] = SortOrder.DESC,
                   limit: Optional[int] = None,
                   offset: Optional[int] = 0) -> SelectRowsResult:
@@ -689,7 +689,8 @@ class DatasetDuckDB(DatasetDB):
 
     cols = [column_from_identifier(column) for column in columns or []]
     # Always return the UUID column.
-    if (UUID_COLUMN,) not in [col.feature for col in cols]:
+    col_paths = [col.feature for col in cols]
+    if (UUID_COLUMN,) not in col_paths:
       cols.append(column_from_identifier(UUID_COLUMN))
 
     self._validate_columns(cols)
@@ -703,17 +704,22 @@ class DatasetDuckDB(DatasetDB):
       query = query.filter(' AND '.join(filter_queries))
 
     if sort_by:
-      for sort_by_alias in sort_by:
-        if sort_by_alias not in col_aliases:
+      sort_by_paths = [normalize_path(path) for path in sort_by]
+      for sort_by_orig, sort_by_path in zip(sort_by, sort_by_paths):
+        if sort_by_orig not in col_aliases and sort_by_path not in col_paths:
           raise ValueError(
-              f'Column {sort_by_alias} is not defined as an alias in the given columns. '
-              f'Available sort by aliases: {col_aliases}')
+              f'Column {sort_by_orig} is not defined as an alias in the given columns and is not '
+              'defined in the select. The sort by path must be defined in either the columns or as '
+              'a column alias.'
+              f'Available sort by aliases: {col_aliases}.\n'
+              f'Available columns: {columns}.\n')
 
       if not sort_order:
         raise ValueError(
             'Sort order is undefined but sort by is defined. Please define a sort_order')
 
-      query = query.order(f'{", ".join(sort_by)} {sort_order.value}')
+      sort_cols = [self._path_to_col(sort_by_el) for sort_by_el in sort_by]
+      query = query.order(f'{", ".join(sort_cols)} {sort_order.value}')
 
     if limit:
       query = query.limit(limit, offset or 0)
