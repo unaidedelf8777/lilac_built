@@ -241,7 +241,13 @@ export const SearchBox = () => {
                 <SortByOrder
                   onSelect={(order) => {
                     const by = (activePage as Page<'sort-by-order'>).metadata!.path;
-                    dispatch(setSort({by: [by], order}));
+                    dispatch(
+                      setSort({
+                        namespace: namespace!,
+                        datasetName: datasetName!,
+                        sort: {by: [by], order},
+                      })
+                    );
                     closeMenu();
                   }}
                 ></SortByOrder>
@@ -290,9 +296,14 @@ export const SearchBox = () => {
                   onSelect={(path) => {
                     dispatch(
                       setActiveConcept({
-                        concept: (activePage as Page<'edit-concept-column'>).metadata!.concept,
-                        embedding: (activePage as Page<'edit-concept-column'>).metadata!.embedding,
-                        column: path,
+                        namespace: namespace!,
+                        datasetName: datasetName!,
+                        activeConcept: {
+                          concept: (activePage as Page<'edit-concept-column'>).metadata!.concept,
+                          embedding: (activePage as Page<'edit-concept-column'>).metadata!
+                            .embedding,
+                          column: path,
+                        },
                       })
                     );
                     closeMenu();

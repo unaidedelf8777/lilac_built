@@ -3,10 +3,11 @@ from typing import Iterable, Literal, Optional, Union
 
 import numpy as np
 from pydantic import BaseModel
-from sklearn import linear_model
+from sklearn.linear_model import LogisticRegression
 
 from ..embeddings.embedding_registry import get_embedding_cls
 from ..schema import RichData
+from ..utils import DebugTimer
 
 LOCAL_CONCEPT_NAMESPACE = 'local'
 
@@ -65,8 +66,13 @@ class ConceptModel(BaseModel):
 
   # The following fields are excluded from JSON serialization, but still pickleable.
   _embeddings: dict[str, np.ndarray] = {}
-  _model: linear_model.LogisticRegression = linear_model.LogisticRegression(solver='liblinear',
-                                                                            class_weight='balanced')
+  # See `notebooks/Toxicity.ipynb` for an example of training a concept model.
+  _model: LogisticRegression = LogisticRegression(class_weight='balanced',
+                                                  C=30,
+                                                  tol=1e-5,
+                                                  warm_start=True,
+                                                  max_iter=1_000,
+                                                  n_jobs=-1)
 
   def score_embeddings(self, embeddings: np.ndarray) -> np.ndarray:
     """Get the scores for the provided embeddings."""
@@ -98,7 +104,9 @@ class ConceptModel(BaseModel):
         # TODO(smilkov): Support images.
         texts_of_missing_embeddings[id] = example.text or ''
     missing_ids = texts_of_missing_embeddings.keys()
-    missing_embeddings = embed_fn(list(texts_of_missing_embeddings.values()))
+    with DebugTimer(f'Computing embeddings for examples in concept '
+                    f'"{self.namespace}/{self.concept_name}/{self.embedding_name}"'):
+      missing_embeddings = embed_fn(list(texts_of_missing_embeddings.values()))
 
     for id, embedding in zip(missing_ids, missing_embeddings):
       concept_embeddings[id] = embedding

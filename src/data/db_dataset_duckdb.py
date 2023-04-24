@@ -12,6 +12,7 @@ from pandas.api.types import is_object_dtype
 from pydantic import BaseModel, validator
 from typing_extensions import override
 
+from ..concepts.db_concept import DISK_CONCEPT_MODEL_DB, ConceptModelDB
 from ..constants import data_path
 from ..embeddings.embedding_index import EmbeddingIndexer
 from ..embeddings.embedding_index_disk import EmbeddingIndexerDisk
@@ -38,6 +39,7 @@ from ..schema import (
     is_repeated_path_part,
     normalize_path,
 )
+from ..signals.concept_scorer import ConceptScoreSignal
 from ..signals.signal import Signal
 from ..signals.signal_registry import resolve_signal
 from ..tasks import TaskId, progress
@@ -150,23 +152,20 @@ class SelectLeafsResult(BaseModel):
   value_column: Optional[str]
 
 
-class DuckDBTableInfo(BaseModel):
-  """Internal representation of a DuckDB table."""
-  manifest: DatasetManifest
-  computed_columns: list[ComputedColumn]
-
-
 ColumnEmbedding = tuple[PathTuple, str]
 
 
 class DatasetDuckDB(DatasetDB):
   """The DuckDB implementation of the dataset database."""
 
-  def __init__(self,
-               namespace: str,
-               dataset_name: str,
-               embedding_indexer: Optional[EmbeddingIndexer] = None,
-               vector_store_cls: Type[VectorStore] = NumpyVectorStore):
+  def __init__(
+      self,
+      namespace: str,
+      dataset_name: str,
+      embedding_indexer: Optional[EmbeddingIndexer] = None,
+      vector_store_cls: Type[VectorStore] = NumpyVectorStore,
+      concept_model_db: ConceptModelDB = DISK_CONCEPT_MODEL_DB,
+  ):
     super().__init__(namespace, dataset_name)
 
     self.dataset_path = get_dataset_output_dir(data_path(), namespace, dataset_name)
@@ -185,6 +184,7 @@ class DatasetDuckDB(DatasetDB):
     # Maps a column path and embedding to the vector store. This is lazily generated as needed.
     self._col_embedding_stores: dict[ColumnEmbedding, VectorStore] = {}
     self.vector_store_cls = vector_store_cls
+    self._concept_model_db = concept_model_db
 
   def _create_view(self, view_name: str, files: list[str]) -> None:
     parquet_files = [os.path.join(self.dataset_path, filename) for filename in files]
@@ -194,7 +194,7 @@ class DatasetDuckDB(DatasetDB):
 
   @functools.cache
   # NOTE: This is cached, but when the list of filepaths changed the results are invalidated.
-  def _recompute_joint_table(self, signal_manifest_filepaths: tuple[str]) -> DuckDBTableInfo:
+  def _recompute_joint_table(self, signal_manifest_filepaths: tuple[str]) -> DatasetManifest:
     computed_columns: list[ComputedColumn] = []
 
     # Add the signal column groups.
@@ -246,15 +246,14 @@ class DatasetDuckDB(DatasetDB):
             **{col.top_level_column_name: col.value_field_schema for col in computed_columns}
         })
 
-    manifest = DatasetManifest(namespace=self.namespace,
-                               dataset_name=self.dataset_name,
-                               data_schema=merged_schema,
-                               embedding_manifest=self._embedding_indexer.manifest(),
-                               num_items=num_items)
+    return DatasetManifest(namespace=self.namespace,
+                           dataset_name=self.dataset_name,
+                           data_schema=merged_schema,
+                           embedding_manifest=self._embedding_indexer.manifest(),
+                           num_items=num_items)
 
-    return DuckDBTableInfo(manifest=manifest, computed_columns=computed_columns)
-
-  def _table_info(self) -> DuckDBTableInfo:
+  @override
+  def manifest(self) -> DatasetManifest:
     signal_manifest_filepaths: list[str] = []
     for root, _, files in os.walk(self.dataset_path):
       for file in files:
@@ -262,10 +261,6 @@ class DatasetDuckDB(DatasetDB):
           signal_manifest_filepaths.append(os.path.join(root, file))
 
     return self._recompute_joint_table(tuple(signal_manifest_filepaths))
-
-  @override
-  def manifest(self) -> DatasetManifest:
-    return self._table_info().manifest
 
   def count(self, filters: Optional[list[FilterLike]] = None) -> int:
     """Count the number of rows."""
@@ -496,7 +491,13 @@ class DatasetDuckDB(DatasetDB):
     FROM {from_table}
     {where_query}
     """
-    return SelectLeafsResult(df=self._query_df(query),
+    df = self._query_df(query)
+    # DuckDB returns np.nan for missing field in string column, replace with None for correctness.
+    # TODO(https://github.com/duckdb/duckdb/issues/4066): Remove this once DuckDB/Pandas is fixed.
+    for col in df.columns:
+      if is_object_dtype(df[col]):
+        df[col].replace(np.nan, None, inplace=True)
+    return SelectLeafsResult(df=df,
                              value_column=value_column_alias,
                              repeated_idxs_col=repeated_indices_col)
 
@@ -703,12 +704,14 @@ class DatasetDuckDB(DatasetDB):
     if filter_queries:
       query = query.filter(' AND '.join(filter_queries))
 
-    if sort_by:
-      sort_by_paths = [normalize_path(path) for path in sort_by]
-      for sort_by_orig, sort_by_path in zip(sort_by, sort_by_paths):
-        if sort_by_orig not in col_aliases and sort_by_path not in col_paths:
+    sort_by_transform = False
+    sort_by_paths = [normalize_path(path) for path in (sort_by or [])]
+    sort_cols_after_udf: list[str] = []
+    if sort_by_paths:
+      for sort_by_path in sort_by_paths:
+        if sort_by_path[0] not in col_aliases and sort_by_path not in col_paths:
           raise ValueError(
-              f'Column {sort_by_orig} is not defined as an alias in the given columns and is not '
+              f'Column {sort_by_path} is not defined as an alias in the given columns and is not '
               'defined in the select. The sort by path must be defined in either the columns or as '
               'a column alias.'
               f'Available sort by aliases: {col_aliases}.\n'
@@ -718,10 +721,20 @@ class DatasetDuckDB(DatasetDB):
         raise ValueError(
             'Sort order is undefined but sort by is defined. Please define a sort_order')
 
-      sort_cols = [self._path_to_col(sort_by_el) for sort_by_el in sort_by]
-      query = query.order(f'{", ".join(sort_cols)} {sort_order.value}')
+      sort_cols_before_udf: list[str] = []
+      for sort_by_path in sort_by_paths:
+        sort_col = self._path_to_col(sort_by_path)
+        # Separate sort columns into two groups: those that need to be sorted before and after UDFs.
+        if sort_by_transform or col_aliases.get(str(sort_by_path[0])):
+          sort_by_transform = True
+          sort_cols_after_udf.append(sort_col)
+        else:
+          sort_cols_before_udf.append(sort_col)
 
-    if limit:
+      if sort_cols_before_udf:
+        query = query.order(f'{", ".join(sort_cols_before_udf)} {sort_order.value}')
+
+    if limit and not sort_cols_after_udf:
       query = query.limit(limit, offset or 0)
 
     # Download the data so we can run UDFs on it in Python.
@@ -730,33 +743,55 @@ class DatasetDuckDB(DatasetDB):
     # Run UDFs on the transformed columns.
     transform_columns = [col for col in cols if col.transform]
     for transform_col in transform_columns:
-      if not isinstance(transform_col.transform, SignalTransform):
-        raise ValueError(f'Unsupported transform: {transform_col.transform}')
-      signal = transform_col.transform.signal
-      signal_column = transform_col.alias
-      input = df[signal_column]
+      transform = transform_col.transform
 
-      if signal.embedding_based:
-        if signal.embedding is None:
-          raise ValueError('`Signal.embedding` must be defined for embedding-based signals.')
+      if isinstance(transform, SignalTransform):
+        signal = transform.signal
+        if isinstance(signal, ConceptScoreSignal):
+          # Make sure the model is in sync.
+          concept_model = self._concept_model_db.get(signal.namespace, signal.concept_name,
+                                                     signal.embedding_name)
+          self._concept_model_db.sync(concept_model)
 
-        # For embedding based signals, get the leaf keys and indices, creating a combined key for
-        # the key + index to pass to the signal.
-        flat_keys = flatten_keys(df[UUID_COLUMN], input)
-        vector_store = self._get_vector_store(transform_col.feature, signal.embedding)
-        flat_output = signal.compute(keys=flat_keys, vector_store=vector_store)
+        signal_column = transform_col.alias
+        input = df[signal_column]
+
+        with DebugTimer(f'Computing signal "{signal}"'):
+          if signal.embedding_based:
+            if signal.embedding is None:
+              raise ValueError('`Signal.embedding` must be defined for embedding-based signals.')
+
+            # For embedding based signals, get the leaf keys and indices, creating a combined key
+            # for the key + index to pass to the signal.
+            flat_keys = flatten_keys(df[UUID_COLUMN], input)
+            vector_store = self._get_vector_store(transform_col.feature, signal.embedding)
+            flat_output = signal.compute(keys=flat_keys, vector_store=vector_store)
+          else:
+            flat_input = cast(Iterable[RichData], flatten(input))
+            flat_output = signal.compute(flat_input)
+
+        df[signal_column] = unflatten(flat_output, input)
       else:
-        flat_input = cast(Iterable[RichData], flatten(input))
-        flat_output = signal.compute(flat_input)
+        raise ValueError(f'Unsupported transform: {transform}')
 
-      df[signal_column] = unflatten(flat_output, input)
-
-    if transform_filters:
-      # Re-upload the udf outputs to duckdb so we can filter on them.
+    if transform_filters or sort_cols_after_udf:
+      # Re-upload the udf outputs to duckdb so we can filter/sort on them.
       query = con.from_df(df)
-      transform_filter_queries = self._create_where(transform_filters)
-      if transform_filter_queries:
-        query = query.filter(' AND '.join(transform_filter_queries))
+
+      if transform_filters:
+        transform_filter_queries = self._create_where(transform_filters)
+        if transform_filter_queries:
+          query = query.filter(' AND '.join(transform_filter_queries))
+
+      if sort_cols_after_udf:
+        if not sort_order:
+          raise ValueError(
+              'Sort order is undefined but sort by is defined. Please define a sort_order')
+        query = query.order(f'{", ".join(sort_cols_after_udf)} {sort_order.value}')
+
+      if limit:
+        query = query.limit(limit, offset or 0)
+
       df = query.df()
 
     query.close()

@@ -1,6 +1,6 @@
 """Router for the dataset database."""
 import os
-from typing import Any, Optional, Sequence
+from typing import Any, Optional, Sequence, Union
 
 from fastapi import APIRouter, Response
 from pydantic import BaseModel, validator
@@ -8,6 +8,7 @@ from pydantic import BaseModel, validator
 from .constants import data_path
 from .data.db_dataset import (
     Bins,
+    Column,
     DatasetManifest,
     Filter,
     GroupsSortBy,
@@ -177,7 +178,9 @@ def get_stats(namespace: str, dataset_name: str, options: GetStatsOptions) -> St
 
 class SelectRowsOptions(BaseModel):
   """The request for the select rows endpoint."""
-  columns: Optional[Sequence[PathTuple]]
+  # OpenAPI doesn't generate the correct typescript when using `Sequence[ColumnId]` (confused by
+  # `tuple[Union[str, int], ...]`).
+  columns: Optional[Sequence[Union[tuple[str, ...], Column]]]
   filters: Optional[Sequence[Filter]]
   sort_by: Optional[Sequence[PathTuple]]
   sort_order: Optional[SortOrder] = SortOrder.DESC
