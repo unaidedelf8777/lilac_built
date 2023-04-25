@@ -475,14 +475,14 @@ class SelectRowsSuite:
   class LengthSignal(Signal):
     name = 'length_signal'
     enrichment_type = EnrichmentType.TEXT
-    embedding_based = False
+    vector_based = False
 
     call_count: int = 0
 
     def fields(self, input_column: Path) -> Field:
       return Field(dtype=DataType.INT32)
 
-    def compute(self, data: Iterable[RichData]) -> Iterable[Optional[SignalOut]]:  # type: ignore
+    def compute(self, data: Iterable[RichData]) -> Iterable[Optional[SignalOut]]:
       for text_content in data:
         self.call_count += 1
         yield len(text_content)
@@ -1014,19 +1014,14 @@ class SelectRowsSuite:
 class TestSignal(Signal):
   name = 'test_signal'
   enrichment_type = EnrichmentType.TEXT
-  embedding_based = False
+  vector_based = False
 
   @override
   def fields(self, input_column: Path) -> Field:
     return Field(fields={'len': Field(dtype=DataType.INT32), 'flen': Field(dtype=DataType.FLOAT32)})
 
   @override
-  def compute(self,
-              data: Optional[Iterable[RichData]] = None,
-              keys: Optional[Iterable[str]] = None,
-              vector_store: Optional[VectorStore] = None) -> Iterable[Optional[Item]]:
-    if data is None:
-      raise ValueError('data is not defined')
+  def compute(self, data: Iterable[RichData]) -> Iterable[Optional[Item]]:
     return [{'len': len(text_content), 'flen': float(len(text_content))} for text_content in data]
 
 
@@ -1044,13 +1039,7 @@ class TestSplitterWithLen(Signal):
         }))
 
   @override
-  def compute(self,
-              data: Optional[Iterable[RichData]] = None,
-              keys: Optional[Iterable[str]] = None,
-              vector_store: Optional[VectorStore] = None) -> Iterable[ItemValue]:
-    if data is None:
-      raise ValueError('Sentence splitter requires text data.')
-
+  def compute(self, data: Iterable[RichData]) -> Iterable[ItemValue]:
     for text in data:
       if not isinstance(text, str):
         raise ValueError(f'Expected text to be a string, got {type(text)} instead.')
@@ -1065,21 +1054,14 @@ class TestEmbeddingSumSignal(Signal):
   """Sums the embeddings to return a single floating point value."""
   name = 'test_embedding_sum'
   enrichment_type = EnrichmentType.TEXT
-  embedding_based = True
+  vector_based = True
 
   @override
   def fields(self, input_column: Path) -> Field:
     return Field(dtype=DataType.FLOAT32)
 
   @override
-  def compute(self,
-              data: Optional[Iterable[RichData]] = None,
-              keys: Optional[Iterable[str]] = None,
-              vector_store: Optional[VectorStore] = None) -> Iterable[ItemValue]:
-    if keys is None:
-      raise ValueError('Embedding sum signal requires keys.')
-    if vector_store is None:
-      raise ValueError('vector_store is None.')
+  def vector_compute(self, keys: Iterable[str], vector_store: VectorStore) -> Iterable[ItemValue]:
     if not self.embedding:
       raise ValueError('self.embedding is None.')
 
@@ -1098,10 +1080,7 @@ class TestInvalidSignal(Signal):
     return Field(dtype=DataType.INT32)
 
   @override
-  def compute(self,
-              data: Optional[Iterable[RichData]] = None,
-              keys: Optional[Iterable[str]] = None,
-              vector_store: Optional[VectorStore] = None) -> Iterable[Optional[Item]]:
+  def compute(self, data: Iterable[RichData]) -> Iterable[Optional[Item]]:
     # Return an invalid output that doesn't match the input length.
     return []
 
