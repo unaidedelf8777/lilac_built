@@ -5,7 +5,16 @@ import spacy
 from spacy import Language
 from typing_extensions import override
 
-from ...schema import DataType, EnrichmentType, Field, ItemValue, Path, RichData, TextSpan
+from ...schema import (
+    DataType,
+    EnrichmentType,
+    Entity,
+    EntityField,
+    Field,
+    ItemValue,
+    RichData,
+    TextSpan,
+)
 from ...signals.signal import Signal
 
 
@@ -24,15 +33,15 @@ class SentenceSplitterSpacy(Signal):
     self._tokenizer.add_pipe('sentencizer')
 
   @override
-  def fields(self, input_column: Path) -> Field:
-    return Field(repeated_field=Field(dtype=DataType.STRING_SPAN, refers_to=input_column))
+  def fields(self) -> Field:
+    return Field(repeated_field=EntityField(Field(dtype=DataType.STRING_SPAN)))
 
   @override
   def compute(self, data: Iterable[RichData]) -> Iterable[Optional[ItemValue]]:
     text_data = (row if isinstance(row, str) else '' for row in data)
     for doc in self._tokenizer.pipe(text_data):
       sentences = doc.sents
-      result = [TextSpan(start=token.start_char, end=token.end_char) for token in sentences]
+      result = [Entity(TextSpan(start=token.start_char, end=token.end_char)) for token in sentences]
       if result:
         yield result
       else:
