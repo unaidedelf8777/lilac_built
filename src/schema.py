@@ -9,7 +9,8 @@ import numpy as np
 import pyarrow as pa
 from pydantic import (
     BaseModel,
-    Field as pydantic_Field,
+    StrictInt,
+    StrictStr,
     validator,
 )
 
@@ -19,9 +20,12 @@ PARQUET_FILENAME_PREFIX = 'data'
 # We choose `__rowid__` inspired by the standard `rowid` pseudocolumn in DBs:
 # https://docs.oracle.com/cd/B19306_01/server.102/b14200/pseudocolumns008.htm
 UUID_COLUMN = '__rowid__'
+# Top-level column name to namespace all the data produced by lilac. This avoids polluting the
+# source data with enriched results.
+LILAC_COLUMN = '__lilac__'
 PATH_WILDCARD = '*'
 ENTITY_FEATURE_KEY = '__entity__'
-
+ENTITY_METADATA_KEY = '__metadata__'
 TEXT_SPAN_START_FEATURE = 'start'
 TEXT_SPAN_END_FEATURE = 'end'
 
@@ -38,8 +42,8 @@ SignalOut = Union[ItemValue, Item]
 #  ['article', 'field'] represents {'article': {'field': VALUES}}
 #  ['article', '*', 'field'] represents {'article': [{'field': VALUES}, {'field': VALUES}]}
 #  ['article', 0, 'field'] represents {'article': [{'field': VALUES}, {'field': UNRELATED}]}
-PathTuple = tuple[Union[str, int], ...]
-Path = Union[str, PathTuple]
+PathTuple = tuple[Union[StrictInt, StrictStr], ...]
+Path = Union[StrictStr, PathTuple]
 
 PathKeyedItem = tuple[Path, Item]
 
@@ -168,37 +172,43 @@ class Field(BaseModel):
     return f' {self.__class__.__name__}::{self.json(exclude_none=True, indent=2)}'
 
 
-def EntityField(entity_value: Field, fields: Optional[dict[str, Field]] = {}) -> Field:
+def EntityField(entity_value: Field,
+                metadata: Optional[dict[str, Field]] = {},
+                extra_data: Optional[dict[str, Field]] = {}) -> Field:
   """Returns a field that represents an entity."""
-  return Field(
-      fields={
-          ENTITY_FEATURE_KEY: entity_value,
-          **(fields or {})
-      },
+  res = Field(
+      fields={ENTITY_FEATURE_KEY: entity_value},
       is_entity=True,
       derived_from=entity_value.derived_from)
+  if metadata and res.fields:
+    res.fields[ENTITY_METADATA_KEY] = Field(fields=metadata, derived_from=entity_value.derived_from)
+  if extra_data and res.fields:
+    res.fields = {**res.fields, **extra_data}
+  return res
 
 
-def Entity(entity: Item, metadata: Optional[Item] = {}) -> Item:
+def Entity(entity: Item, metadata: Optional[Item] = {}, extra_data: Optional[Item] = {}) -> Item:
   """Creates an entity item."""
-  return {ENTITY_FEATURE_KEY: entity, **(metadata or {})}
+  return {ENTITY_FEATURE_KEY: entity, ENTITY_METADATA_KEY: metadata or {}, **(extra_data or {})}
 
 
 class Schema(BaseModel):
   """Database schema."""
   fields: dict[str, Field]
-  # We exclude the computed property `leafs` from the dict() and json() serialization.
-  leafs: dict[PathTuple, Field] = pydantic_Field(exclude=True, default={})
+  # Cached leafs.
+  _leafs: Optional[dict[PathTuple, Field]] = None
 
-  @validator('leafs', pre=True, always=True)
-  def compute_leafs(cls, leafs: dict[PathTuple, Field],
-                    values: dict[str, Any]) -> dict[PathTuple, Field]:
+  class Config:
+    arbitrary_types_allowed = True
+    underscore_attrs_are_private = True
+
+  @property
+  def leafs(self) -> dict[PathTuple, Field]:
     """Return all the leaf fields in the schema (a leaf holds a primitive value)."""
-    if leafs:
-      return leafs
-    fields = cast(dict[str, Field], values.get('fields'))
+    if self._leafs:
+      return self._leafs
     result: dict[PathTuple, Field] = {}
-    q: deque[tuple[PathTuple, Field]] = deque([((), Field(fields=fields))])
+    q: deque[tuple[PathTuple, Field]] = deque([((), Field(fields=self.fields))])
     while q:
       path, field = q.popleft()
       if field.dtype == DataType.STRING_SPAN:
@@ -213,7 +223,22 @@ class Schema(BaseModel):
         q.append((child_path, field.repeated_field))
       else:
         result[path] = field
+    self._leafs = result
     return result
+
+  def get_field(self, path: PathTuple) -> Field:
+    """Returns the field at the given path."""
+    field = cast(Field, self)
+    for name in path:
+      if field.fields:
+        field = field.fields[str(name)]
+      elif field.repeated_field:
+        if name != PATH_WILDCARD:
+          raise ValueError(f'Invalid path {path}')
+        field = field.repeated_field
+      else:
+        raise ValueError(f'Invalid path {path}')
+    return field
 
   def __str__(self) -> str:
     return _str_fields(self.fields, indent=0)
@@ -235,9 +260,21 @@ def entity_paths(field: Field) -> list[PathTuple]:
   return entities
 
 
-def TextSpan(start: int, end: int) -> Item:
+def TextEntity(start: int,
+               end: int,
+               metadata: Optional[Item] = {},
+               extra_data: Optional[Item] = {}) -> Item:
   """Return the span item from start and end character offets."""
-  return {TEXT_SPAN_START_FEATURE: start, TEXT_SPAN_END_FEATURE: end}
+  span: Item = {TEXT_SPAN_START_FEATURE: start, TEXT_SPAN_END_FEATURE: end}
+  return Entity(span, metadata, extra_data)
+
+
+def TextEntityField(metadata: Optional[dict[str, Field]] = {},
+                    extra_data: Optional[dict[str, Field]] = {},
+                    derived_from: Optional[PathTuple] = None) -> Field:
+  """Returns a field that represents an entity."""
+  return EntityField(
+      Field(dtype=DataType.STRING_SPAN, derived_from=derived_from), metadata, extra_data)
 
 
 def child_item_from_column_path(item: Item, path: Path) -> Item:
@@ -327,11 +364,6 @@ def normalize_path(path: Path) -> PathTuple:
   if isinstance(path, str):
     return tuple(path.split('.'))
   return path
-
-
-def is_repeated_path_part(path_component: Union[str, int]) -> bool:
-  """Return True if the path component is a repeated path part."""
-  return isinstance(path_component, int) or path_component == PATH_WILDCARD
 
 
 class ImageInfo(BaseModel):

@@ -1,44 +1,23 @@
 """Utilities for working with datasets."""
 
 from collections.abc import Iterable
-from typing import Generator, Iterator, Optional, Sequence, Union, cast
+from typing import Generator, Iterator, Union, cast
 
 from ..schema import (
+    ENTITY_FEATURE_KEY,
+    LILAC_COLUMN,
     PATH_WILDCARD,
     UUID_COLUMN,
     DataType,
     Field,
-    Item,
-    Path,
     PathTuple,
     Schema,
-    SignalOut,
-    column_paths_match,
-    normalize_path,
 )
-
-
-def replace_repeated_wildcards(path: Path, path_repeated_idxs: Optional[list[int]]) -> Path:
-  """Replace the repeated wildcards in a path with the repeated indexes."""
-  if path_repeated_idxs is None:
-    # No repeated indexes, so just return the path.
-    return path
-
-  replaced_path: list[Union[str, int]] = []
-  path_repeated_idx_i = 0
-  for path_part in path:
-    # Replace wildcards with the actual index.
-    if path_part == PATH_WILDCARD:
-      replaced_path.append(path_repeated_idxs[path_repeated_idx_i])
-      path_repeated_idx_i += 1
-    else:
-      replaced_path.append(path_part)
-
-  return tuple(replaced_path)
+from ..signals.signal import Signal
 
 
 def is_primitive(obj: object) -> bool:
-  """Returns True if the object is an iterable but not a string or bytes."""
+  """Returns True if the object is a primitive."""
   return not isinstance(obj, Iterable) or isinstance(obj, (str, bytes))
 
 
@@ -56,7 +35,14 @@ def flatten(input: Union[Iterable, object]) -> list[object]:
   return list(_flatten(input))
 
 
-def _unflatten(flat_input: Iterator[list[object]], original_input: Union[Iterable, object]) -> list:
+def _wrap_value_in_dict(input: Union[object, dict], props: PathTuple) -> Union[object, dict]:
+  for prop in reversed(props):
+    input = {prop: input}
+  return input
+
+
+def _unflatten(flat_input: Iterator[list[object]],
+               original_input: Union[Iterable, object]) -> Union[list, dict]:
   """Unflattens a flattened iterable according to the original iterable's structure."""
   if is_primitive(original_input):
     return next(flat_input)
@@ -66,193 +52,114 @@ def _unflatten(flat_input: Iterator[list[object]], original_input: Union[Iterabl
 
 def unflatten(flat_input: Iterable, original_input: Union[Iterable, object]) -> list:
   """Unflattens a flattened iterable according to the original iterable's structure."""
-  return _unflatten(iter(flat_input), original_input)
+  return cast(list, _unflatten(iter(flat_input), original_input))
 
 
-def make_enriched_items(source_path: Path, row_ids: Sequence[str],
-                        leaf_items: Iterable[Optional[SignalOut]],
-                        repeated_idxs: Iterable[Optional[list[int]]]) -> Iterable[Item]:
-  """Make enriched items from leaf items and a path. This is used by both signals and splitters.
-
-  NOTE: The iterables that are passed in are not 1:1 with row_ids. The logic of this method will
-  merge the same UUIDs as long as they are contiguous.
-  """
-  working_enriched_item: Item = {}
-  num_outputs = 0
-  outputs_per_key = 0
-
-  last_row_id: Optional[str] = None
-  for row_id, leaf_item, path_repeated_idxs in zip(row_ids, leaf_items, repeated_idxs):
-    num_outputs += 1
-
-    # Duckdb currently just returns a single int as that's all we support. The rest of the code
-    # supports arrays, so we make it an array for the future when duckdb gives us a list of indices.
-    if isinstance(path_repeated_idxs, int):
-      path_repeated_idxs = [path_repeated_idxs]
-
-    if last_row_id is None:
-      last_row_id = row_id
-      working_enriched_item = {UUID_COLUMN: row_id}
-
-    # When we're at a new row_id, yield the last working item.
-    if last_row_id != row_id:
-      if outputs_per_key > 0:
-        yield working_enriched_item
-      last_row_id = row_id
-      working_enriched_item = {UUID_COLUMN: row_id}
-      outputs_per_key = 0
-
-    if not leaf_item:
-      continue
-
-    # Tracking outputs per key allows us to know if we have a sparse output so it will not be
-    # yielded at all.
-    outputs_per_key += 1
-
-    # Apply the list of path indices to the path to replace wildcards.
-    resolved_path = replace_repeated_wildcards(
-        path=source_path, path_repeated_idxs=path_repeated_idxs)
-
-    # Now that we have resolves indices, we can modify the enriched item.
-    enrich_item_from_leaf_item(
-        enriched_item=working_enriched_item, path=resolved_path, leaf_item=leaf_item)
-
-  if num_outputs != len(row_ids):
-    raise ValueError(
-        f'The enriched outputs ({num_outputs}) and the input data ({len(row_ids)}) do not have the '
-        'same length. This means the enricher either didnt generate a "None" for a sparse output, '
-        'or generated too many items.')
-
-  if outputs_per_key > 0:
-    yield working_enriched_item
+def wrap_in_dicts(input: Union[object, Iterable[object]],
+                  spec: list[PathTuple]) -> Iterable[object]:
+  """Wraps an object or iterable in a dict according to the spec."""
+  props = spec[0] if spec else tuple()
+  if is_primitive(input) or isinstance(input, dict):
+    return cast(Iterable, _wrap_value_in_dict(input, props))
+  else:
+    return [
+        _wrap_value_in_dict(wrap_in_dicts(elem, spec[1:]), props) for elem in cast(Iterable, input)
+    ]
 
 
-def enrich_item_from_leaf_item(enriched_item: Item, path: Path, leaf_item: SignalOut) -> None:
-  """Create an enriched item with the same hierarchy as the source."""
-  path = normalize_path(path)
-
-  enriched_subitem = enriched_item
-  for i in range(len(path) - 1):
-    path_component = path[i]
-    next_path_component = path[i + 1]
-    if isinstance(path_component, str):
-      if path_component not in enriched_subitem:
-        if isinstance(next_path_component, str):
-          enriched_subitem[path_component] = {}
-        else:
-          # This needs to be filled to the length of the index. Since this is the first time we've
-          # seen path_component, we can fill it exactly to the index we're going to inject.
-          enriched_subitem[path_component] = [None] * (next_path_component + 1)
+def _merge_field_into(schema: Field, destination: Field) -> None:
+  if isinstance(schema, Field):
+    destination.is_entity = destination.is_entity or schema.is_entity
+    destination.derived_from = destination.derived_from or schema.derived_from
+  if schema.fields:
+    if destination.fields is None:
+      raise ValueError('Failed to merge schemas. Origin schema has fields but destination does not')
+    for field_name, subfield in schema.fields.items():
+      if field_name not in destination.fields:
+        destination.fields[field_name] = subfield.copy(deep=True)
       else:
-        if isinstance(next_path_component, int):
-          # We may need to extend the length so we can write the new index.
-          cur_len = len(enriched_subitem[path_component])  # type: ignore
-          if cur_len <= next_path_component:
-            enriched_subitem[path_component].extend(  # type: ignore
-                [None] * (next_path_component - cur_len + 1))
-    elif isinstance(path_component, int):
-      # The nested list of nones above will fill in integer indices.
-      if isinstance(next_path_component, str):
-        enriched_subitem[path_component] = {}  # type: ignore
-      elif isinstance(next_path_component, int):
-        enriched_subitem[path_component] = []  # type: ignore
+        _merge_field_into(subfield, destination.fields[field_name])
+  elif schema.repeated_field:
+    if not destination.repeated_field:
+      raise ValueError('Failed to merge schemas. Origin schema is repeated, but destination is not')
+    _merge_field_into(schema.repeated_field, destination.repeated_field)
+  else:
+    if destination.dtype != schema.dtype:
+      raise ValueError(f'Failed to merge schemas. Origin schema has dtype {schema.dtype}, '
+                       f'but destination has dtype {destination.dtype}')
+
+
+def merge_schemas(schemas: list[Schema]) -> Schema:
+  """Merge a list of schemas."""
+  merged_schema = Schema(fields={})
+  for schema in schemas:
+    _merge_field_into(cast(Field, schema), cast(Field, merged_schema))
+  return merged_schema
+
+
+def schema_contains_path(schema: Schema, path: PathTuple) -> bool:
+  """Check if a schema contains a path."""
+  current_field = cast(Field, schema)
+  for path_part in path:
+    if path_part == PATH_WILDCARD:
+      if current_field.repeated_field is None:
+        return False
+      current_field = current_field.repeated_field
     else:
-      raise ValueError(f'Unknown type {type(path_component)} in path {path}.')
-    enriched_subitem = enriched_subitem[path_component]  # type: ignore
+      if current_field.fields is None or path_part not in current_field.fields:
+        return False
+      current_field = current_field.fields[str(path_part)]
+  return True
 
-  enriched_subitem[path[-1]] = leaf_item  # type: ignore
+
+def path_is_from_lilac(path: PathTuple) -> bool:
+  """Check if a path is from lilac."""
+  return path[0] == LILAC_COLUMN
 
 
-def create_enriched_schema(source_schema: Schema, enrich_path: Path, enrich_field: Field) -> Schema:
+def create_signal_schema(signal: Signal, source_path: PathTuple, schema: Schema) -> Schema:
   """Create a schema describing the enriched fields added an enrichment."""
-  enriched_schema = Schema(fields={UUID_COLUMN: Field(dtype=DataType.STRING)})
-  return _add_enriched_fields_to_schema(
-      source_schema=source_schema,
-      enriched_schema=enriched_schema,
-      enrich_field=enrich_field,
-      enrich_path=normalize_path(enrich_path))
-
-
-def _add_enriched_fields_to_schema(source_schema: Schema, enriched_schema: Schema,
-                                   enrich_field: Field, enrich_path: PathTuple) -> Schema:
-  source_leafs = source_schema.leafs
+  leafs = schema.leafs
   # Validate that the enrich fields are actually a valid leaf path.
-  if enrich_path not in source_leafs:
-    raise ValueError(f'Field for enrichment "{enrich_path}" is not a valid leaf path. '
-                     f'Leaf paths: {source_leafs.keys()}')
+  if source_path not in leafs:
+    raise ValueError(f'"{source_path}" is not a valid leaf path. '
+                     f'Leaf paths: {leafs.keys()}')
 
+  signal_schema = signal.fields()
   # Apply the "derived_from" field lineage to the field we are enriching.
-  enrich_field = apply_field_lineage(enrich_field, enrich_path)
-  for leaf_path, _ in source_leafs.items():
-    field_is_enriched = False
-    if column_paths_match(enrich_path, leaf_path):
-      field_is_enriched = True
-    if not field_is_enriched:
-      continue
+  _apply_field_lineage(signal_schema, source_path)
+  enriched_schema = Field(fields={signal.name: signal_schema})
 
-    # Find the inner most repeated subpath as we will put the enriched schema next to its parent.
-    inner_struct_path_idx = len(leaf_path) - 1
-    for i, path_part in reversed(list(enumerate(leaf_path))):
-      if path_part == PATH_WILDCARD:
-        inner_struct_path_idx = i - 1
-      else:
-        break
+  # If we are enriching an entity we should store the signal data in the entity field's parent.
+  if source_path[-1] == ENTITY_FEATURE_KEY:
+    source_path = source_path[:-1]
+    enriched_schema.derived_from = schema.get_field(source_path).derived_from
 
-    repeated_depth = len(leaf_path) - 1 - inner_struct_path_idx
+  for path_part in reversed(source_path):
+    if path_part == PATH_WILDCARD:
+      enriched_schema = Field(repeated_field=enriched_schema)
+    else:
+      enriched_schema = Field(fields={path_part: enriched_schema})
 
-    inner_field = enrich_field
+  if not enriched_schema.fields:
+    raise ValueError('This should not happen since enriched_schema always has fields (see above)')
 
-    # Wrap in a list to mirror the input structure.
-    for i in range(repeated_depth):
-      inner_field = Field(repeated_field=inner_field, derived_from=enrich_path)
+  # If a signal is enriching output of a signal, skip the lilac prefix to avoid double prefixing.
+  if path_is_from_lilac(source_path):
+    enriched_schema = enriched_schema.fields[LILAC_COLUMN]
 
-    inner_enrich_path: Path = leaf_path[0:inner_struct_path_idx + 1]
-
-    # Merge the source schema into the enriched schema up until inner struct parent.
-    for i in reversed(range(inner_struct_path_idx + 1)):
-      path_component = cast(str, inner_enrich_path[i])
-
-      if path_component == PATH_WILDCARD:
-        inner_field = Field(repeated_field=inner_field)
-      else:
-        field = get_field_if_exists(enriched_schema, inner_enrich_path[0:i])
-        if field and field.fields:
-          field.fields[path_component] = inner_field
-          break
-        else:
-          inner_field = Field(fields={path_component: inner_field})
-
-  return enriched_schema
+  return Schema(fields={UUID_COLUMN: Field(dtype=DataType.STRING), LILAC_COLUMN: enriched_schema})
 
 
-def apply_field_lineage(field: Field, derived_from: PathTuple) -> Field:
+def _apply_field_lineage(field: Field, derived_from: PathTuple) -> None:
   """Returns a new field with the derived_from field set recursively on all children."""
   if field.dtype == DataType.STRING_SPAN:
     # String spans act as leafs.
     pass
   elif field.fields:
-    for name, child_field in field.fields.items():
-      field.fields[name] = apply_field_lineage(field.fields[name], derived_from)
+    for child_field in field.fields.values():
+      _apply_field_lineage(child_field, derived_from)
   elif field.repeated_field:
-    field.repeated_field = apply_field_lineage(field.repeated_field, derived_from)
+    _apply_field_lineage(field.repeated_field, derived_from)
 
   field.derived_from = derived_from
-  return field
-
-
-def get_field_if_exists(schema: Schema, path: Path) -> Optional[Field]:
-  """Return a field from a path if it exists in the schema."""
-  # Wrap in a field for convenience.
-  field = cast(Field, schema)
-  for path_part in path:
-    if isinstance(path_part, int) or path_part == PATH_WILDCARD:
-      if not field.repeated_field:
-        return None
-      field = field.repeated_field
-    elif isinstance(path_part, str):
-      if not field.fields:
-        return None
-      if path_part not in cast(dict, field.fields):
-        return None
-      field = field.fields[path_part]
-  return field

@@ -1,10 +1,9 @@
 """The DuckDB implementation of the dataset database."""
 import functools
 import glob
-import itertools
 import os
 import re
-from typing import Any, Iterable, Iterator, Optional, Sequence, Type, cast
+from typing import Any, Iterable, Iterator, Optional, Sequence, Type, Union, cast
 
 import duckdb
 import numpy as np
@@ -21,6 +20,8 @@ from ..embeddings.embedding_registry import EmbeddingId, get_embedding_cls
 from ..embeddings.vector_store import VectorStore
 from ..embeddings.vector_store_numpy import NumpyVectorStore
 from ..schema import (
+    ENTITY_FEATURE_KEY,
+    LILAC_COLUMN,
     MANIFEST_FILENAME,
     PATH_WILDCARD,
     TEXT_SPAN_END_FEATURE,
@@ -28,18 +29,18 @@ from ..schema import (
     UUID_COLUMN,
     DataType,
     Field,
+    Item,
+    ItemValue,
     Path,
     PathTuple,
     RichData,
     Schema,
-    SignalOut,
     SourceManifest,
     enrichment_supports_dtype,
     entity_paths,
     is_float,
     is_integer,
     is_ordinal,
-    is_repeated_path_part,
     normalize_path,
 )
 from ..signals.concept_scorer import ConceptScoreSignal
@@ -49,11 +50,14 @@ from ..tasks import TaskId, progress
 from ..utils import DebugTimer, get_dataset_output_dir, log, open_file, write_items_to_parquet
 from . import db_dataset
 from .dataset_utils import (
-    create_enriched_schema,
+    create_signal_schema,
     flatten,
     is_primitive,
-    make_enriched_items,
+    merge_schemas,
+    path_is_from_lilac,
+    schema_contains_path,
     unflatten,
+    wrap_in_dicts,
 )
 from .db_dataset import (
     Bins,
@@ -71,10 +75,11 @@ from .db_dataset import (
     SelectGroupsResult,
     SelectRowsResult,
     SignalTransform,
+    SignalUDF,
     SortOrder,
     StatsResult,
     column_from_identifier,
-    default_top_level_signal_col_name,
+    make_parquet_id,
 )
 
 DEBUG = CONFIG['DEBUG'] == 'true' if 'DEBUG' in CONFIG else False
@@ -120,36 +125,6 @@ class DuckDBSelectGroupsResult(SelectGroupsResult):
     return self._df
 
 
-class ComputedColumn(BaseModel):
-  """A column that is computed/derived from another column."""
-
-  # The parquet files that contain the column values.
-  files: list[str]
-
-  # The name of the column when merged into a larger table.
-  top_level_column_name: str
-
-  # The name of the field that contains the values.
-  value_field_name: str
-
-  # The field schema of column value.
-  value_field_schema: Field
-
-  # The path to the column this column is derived from.
-  enriched_path: Path
-
-
-class SelectLeafsResult(BaseModel):
-  """The result of a select leafs query."""
-
-  class Config:
-    arbitrary_types_allowed = True
-
-  df: pd.DataFrame
-  repeated_idxs_col: Optional[str]
-  value_column: Optional[str]
-
-
 ColumnEmbedding = tuple[PathTuple, str]
 
 
@@ -170,7 +145,7 @@ class DatasetDuckDB(DatasetDB):
 
     # TODO: Infer the manifest from the parquet files so this is lighter weight.
     self._source_manifest = read_source_manifest(self.dataset_path)
-
+    self._signal_manifests: list[SignalManifest] = []
     self.con = duckdb.connect(database=':memory:')
     self._create_view('t', self._source_manifest.files)
 
@@ -196,8 +171,12 @@ class DatasetDuckDB(DatasetDB):
   def _recompute_joint_table(self, latest_mtime: float) -> DatasetManifest:
     del latest_mtime  # This is used as the cache key.
 
-    computed_columns: list[ComputedColumn] = []
     entity_indexes: list[EntityIndex] = []
+
+    merged_schema = self._source_manifest.data_schema.copy(deep=True)
+    self._signal_manifests = []
+    # Make a joined view of all the column groups.
+    self._create_view(SOURCE_VIEW_NAME, self._source_manifest.files)
 
     # Add the signal column groups.
     for root, _, files in os.walk(self.dataset_path):
@@ -205,40 +184,33 @@ class DatasetDuckDB(DatasetDB):
         if file.endswith(SIGNAL_MANIFEST_SUFFIX):
           with open_file(os.path.join(root, file)) as f:
             signal_manifest = SignalManifest.parse_raw(f.read())
-          value_field_name = cast(str, signal_manifest.enriched_path[0])
-          signal_column = ComputedColumn(
-              files=signal_manifest.files,
-              top_level_column_name=signal_manifest.top_level_column_name,
-              value_field_name=value_field_name,
-              value_field_schema=signal_manifest.data_schema.fields[value_field_name],
-              enriched_path=signal_manifest.enriched_path)
-          computed_columns.append(signal_column)
+          self._create_view(signal_manifest.parquet_id, signal_manifest.files)
+          self._signal_manifests.append(signal_manifest)
+
         elif file.endswith(ENTITY_INDEX_MANIFEST_SUFFIX):
           with open_file(os.path.join(root, file)) as f:
             entity_index_manifest = EntityIndexManifest.parse_raw(f.read())
 
           entity_indexes.append(entity_index_manifest.entity_index)
 
-    # Make a joined view of all the column groups.
-    self._create_view(SOURCE_VIEW_NAME, self._source_manifest.files)
-    for column in computed_columns:
-      self._create_view(column.top_level_column_name, column.files)
-
+    merged_schema = merge_schemas([self._source_manifest.data_schema] +
+                                  [m.data_schema for m in self._signal_manifests])
     # The logic below generates the following example query:
     # CREATE OR REPLACE VIEW t AS (
     #   SELECT
     #     source.*,
-    #     "enriched.signal1"."enriched" AS "enriched.signal1",
-    #     "enriched.signal2"."enriched" AS "enriched.signal2"
-    #   FROM source JOIN "enriched.signal1" USING (uuid,) JOIN "enriched.signal2" USING (uuid,)
+    #     "parquet_id1"."__LILAC__" AS "parquet_id1",
+    #     "parquet_id2"."__LILAC__" AS "parquet_id2"
+    #   FROM source JOIN "parquet_id1" USING (uuid,) JOIN "parquet_id2" USING (uuid,)
     # );
     select_sql = ', '.join([f'{SOURCE_VIEW_NAME}.*'] + [
-        f'"{col.top_level_column_name}"."{col.value_field_name}" AS "{col.top_level_column_name}"'
-        for col in computed_columns
+        f'"{manifest.parquet_id}"."{LILAC_COLUMN}" AS "{manifest.parquet_id}"'
+        for manifest in self._signal_manifests
     ])
-    join_sql = ' '.join(
-        [SOURCE_VIEW_NAME] +
-        [f'join "{col.top_level_column_name}" using ({UUID_COLUMN},)' for col in computed_columns])
+    join_sql = ' '.join([SOURCE_VIEW_NAME] + [
+        f'join "{manifest.parquet_id}" using ({UUID_COLUMN},)'
+        for manifest in self._signal_manifests
+    ])
 
     sql_cmd = f"""CREATE OR REPLACE VIEW t AS (SELECT {select_sql} FROM {join_sql})"""
     self.con.execute(sql_cmd)
@@ -247,13 +219,6 @@ class DatasetDuckDB(DatasetDB):
     size_query = 'SELECT COUNT() as count FROM t'
     size_query_result = cast(Any, self._query(size_query)[0])
     num_items = cast(int, size_query_result[0])
-
-    # Merge the source manifest with the computed columns.
-    merged_schema = Schema(
-        fields={
-            **self._source_manifest.data_schema.fields,
-            **{col.top_level_column_name: col.value_field_schema for col in computed_columns}
-        })
 
     return DatasetManifest(
         namespace=self.namespace,
@@ -305,85 +270,52 @@ class DatasetDuckDB(DatasetDB):
     if isinstance(col.feature, Column):
       raise ValueError(f'Cannot compute a signal for {col} as it is not a leaf feature.')
 
-    with DebugTimer(f'"_select_leafs" over "{col.feature}"'):
-      select_leafs_result = self._select_leafs(path=normalize_path(col.feature))
-      leafs_df = select_leafs_result.df
+    with DebugTimer(f'"selecting values" over "{col.feature}"'):
+      df = self.select_rows([Column(col.feature, alias='value')], resolve_span=True).df()
 
-    keys = _get_keys_from_leafs(leafs_df=leafs_df, select_leafs_result=select_leafs_result)
-    leaf_values = leafs_df[select_leafs_result.value_column]
-
+    nested_input = df['value']
+    flat_keys = flatten_keys(df[UUID_COLUMN], nested_input)
+    flat_input = cast(Iterable[RichData], flatten(nested_input))
     self._embedding_indexer.compute_embedding_index(
-        column=col.feature, embedding=embedding, keys=keys, data=leaf_values, task_id=task_id)
+        column=col.feature, embedding=embedding, keys=flat_keys, data=flat_input, task_id=task_id)
 
   @override
   def compute_signal_column(self,
                             signal: Signal,
                             column: ColumnId,
-                            signal_column_name: Optional[str] = None,
-                            task_id: Optional[TaskId] = None) -> str:
+                            task_id: Optional[TaskId] = None) -> None:
     column = column_from_identifier(column)
-    if not signal_column_name:
-      signal_column_name = default_top_level_signal_col_name(signal, column)
-
     if isinstance(column.feature, Column):
       raise ValueError(f'Cannot compute a signal for {column} as it is not a leaf feature.')
 
     source_path = normalize_path(column.feature)
     signal_field = signal.fields()
 
+    select_rows_result = self.select_rows([SignalUDF(signal, column, alias='value')],
+                                          task_id=task_id,
+                                          resolve_span=True)
+    df = select_rows_result.df()
+
+    # If we are enriching an entity we should store the signal data in the entity field's parent.
+    if source_path[-1] == ENTITY_FEATURE_KEY:
+      enriched_path = (LILAC_COLUMN, *source_path[:-1], signal.name)
+    else:
+      enriched_path = (LILAC_COLUMN, *source_path, signal.name)
+
+    # If a signal is enriching output of a signal, skip the lilac prefix to avoid double prefixing.
+    if path_is_from_lilac(source_path):
+      enriched_path = enriched_path[1:]
+
+    spec = _split_path_into_subpaths_of_lists(enriched_path)
+    enriched_signal_items = cast(Iterable[Item], wrap_in_dicts(df['value'], spec))
+    for uuid, item in zip(df[UUID_COLUMN], enriched_signal_items):
+      item[UUID_COLUMN] = uuid
+
     signal_entity_paths = entity_paths(signal_field)
     # TODO(nsthorat): Raise if the signal does not produce entities and the input column is not an
     # entity index.
 
-    signal_schema = create_enriched_schema(
-        source_schema=self.manifest().data_schema,
-        enrich_path=source_path,
-        enrich_field=signal_field)
-
-    if signal.vector_based:
-      # For embedding based signals, get the leaf keys and indices, creating a combined key for the
-      # key + index to pass to the signal.
-      with DebugTimer(f'"_select_leafs" over "{source_path}"'):
-        select_leafs_result = self._select_leafs(path=source_path, only_keys=True)
-        leafs_df = select_leafs_result.df
-
-      keys = _get_keys_from_leafs(leafs_df=leafs_df, select_leafs_result=select_leafs_result)
-
-      if signal.embedding is None:
-        raise ValueError('`Signal.embedding` must be defined for embedding-based signals.')
-
-      vector_store = self._get_vector_store(column.feature, signal.embedding)
-
-      with DebugTimer(f'"compute" for embedding signal "{signal.name}" over "{source_path}"'):
-        signal_outputs = signal.vector_compute(keys, vector_store)
-    else:
-      # For non-embedding based signals, get the leaf values and indices.
-      with DebugTimer(f'"_select_leafs" over "{source_path}"'):
-        select_leafs_result = self._select_leafs(path=source_path)
-        leafs_df = select_leafs_result.df
-
-      with DebugTimer(f'"compute" for signal "{signal.name}" over "{source_path}"'):
-        signal_outputs = signal.compute(leafs_df[select_leafs_result.value_column])
-
-    # Add progress.
-    if task_id is not None:
-      signal_outputs = progress(signal_outputs, task_id=task_id, estimated_len=len(leafs_df))
-
-    # Use the repeated indices to generate the correct signal output structure.
-    if select_leafs_result.repeated_idxs_col:
-      repeated_idxs = leafs_df[select_leafs_result.repeated_idxs_col]
-
-    # Repeat "None" if there are no repeated indices without allocating an array. This happens
-    # when the object is a simple structure.
-    repeated_idxs_iter: Iterable[Optional[list[int]]] = (
-        itertools.repeat(None) if not select_leafs_result.repeated_idxs_col else repeated_idxs)
-
-    enriched_signal_items = make_enriched_items(
-        source_path=source_path,
-        row_ids=leafs_df[UUID_COLUMN],
-        leaf_items=signal_outputs,
-        repeated_idxs=repeated_idxs_iter)
-
+    signal_schema = create_signal_schema(signal, source_path, schema=self.manifest().data_schema)
     signal_out_prefix = signal_parquet_prefix(column_name=column.alias, signal_name=signal.name)
     parquet_filename, _ = write_items_to_parquet(
         items=enriched_signal_items,
@@ -398,18 +330,18 @@ class DatasetDuckDB(DatasetDB):
         data_schema=signal_schema,
         signal=signal,
         enriched_path=source_path,
-        top_level_column_name=signal_column_name)
+        parquet_id=make_parquet_id(signal, column))
     signal_manifest_filepath = os.path.join(
         self.dataset_path,
         signal_manifest_filename(column_name=column.alias, signal_name=signal.name))
     with open_file(signal_manifest_filepath, 'w') as f:
-      f.write(signal_manifest.json())
+      f.write(signal_manifest.json(exclude_none=True, indent=2))
     log(f'Wrote signal manifest to {signal_manifest_filepath}')
 
     # If the signal emits entites, write an index for the entities.
     if signal_entity_paths:
       for signal_entity_path in signal_entity_paths:
-        entity_index_path = source_path + (signal_column_name,) + signal_entity_path
+        entity_index_path = source_path + signal_entity_path
         # Write an entity index for each entity the signal produces.
         entity_index_manifest = EntityIndexManifest(
             entity_index=EntityIndex(
@@ -418,118 +350,10 @@ class DatasetDuckDB(DatasetDB):
             self.dataset_path,
             entity_index_manifest_filename(column_name=column.alias, signal_name=signal.name))
         with open_file(entity_index_manifest_filepath, 'w') as f:
-          f.write(entity_index_manifest.json())
+          f.write(entity_index_manifest.json(exclude_none=True, indent=2))
         log(f'Wrote entity index manifest to {signal_manifest_filepath}')
 
-    return signal_column_name
-
-  def _select_leafs(self,
-                    path: PathTuple,
-                    only_keys: Optional[bool] = False,
-                    row_uuid: Optional[str] = None) -> SelectLeafsResult:
-    schema_leafs = self.manifest().data_schema.leafs
-    if path not in schema_leafs:
-      raise ValueError(f'Path "{path}" not found in schema leafs: {schema_leafs}')
-
-    leaf_field = schema_leafs[path]
-    is_span = leaf_field.dtype == DataType.STRING_SPAN
-
-    if not is_span:
-      for path_component in path[0:-1]:
-        if is_repeated_path_part(path_component):
-          raise ValueError(
-              f'Outer repeated leafs are not yet supported in _select_leafs. Requested Path: {path}'
-          )
-    else:
-      # When we have spans, make sure there are not two repeated parts anywhere.
-      num_repeated_parts = 0
-      for path_component in path:
-        if is_repeated_path_part(path_component):
-          num_repeated_parts += 1
-      if num_repeated_parts > 1:
-        raise ValueError(
-            'Multiple repeated leafs for spans are not yet supported in _select_leafs. '
-            f'Requested Path: {path}')
-
-    repeated_indices_col: Optional[str] = None
-    is_repeated = any([is_repeated_path_part(path_part) for path_part in path])
-    if is_repeated:
-      inner_repeated_col = self._path_to_col(
-          path[0:path.index(PATH_WILDCARD)], quote_each_part=True)
-
-    data_col = 'leaf_data'
-    if is_span:
-      if not leaf_field.derived_from:
-        raise ValueError(f'Leaf span field {leaf_field} does not have a "derived_from" attribute.')
-
-      span_select = make_select_column(path)
-      derived_from_path_select = make_select_column(leaf_field.derived_from)
-
-      # In the sub-select, return both the original text and the span.
-      span_name = 'span'
-      data_select = f"""
-            {span_select} as {span_name},
-            {derived_from_path_select} as {data_col},
-      """
-      # In the outer select, return the sliced text. DuckDB 1-indexes array slices, and is inclusive
-      # to the last index, so we only add one to the start.
-      value_column = f"""{data_col}[
-        {span_name}.{TEXT_SPAN_START_FEATURE} + 1:{span_name}.{TEXT_SPAN_END_FEATURE}
-      ]
-      """
-    else:
-      data_select_column = make_select_column(path)
-      data_select = f"""
-          {data_select_column} as {data_col},
-      """
-      value_column = data_col
-
-    value_column_alias = 'value'
-    repeated_indices_col = None
-
-    where_query = ''
-    if row_uuid:
-      where_query = f"WHERE {UUID_COLUMN} = '{row_uuid}'"
-
-    if is_repeated:
-      # Currently we only allow inner repeated leafs, so we can use a simple UNNEST(RANGE(...)) to
-      # get the indices. When this is generalized, the RANGE has to be updated to return the list of
-      # indices.
-      repeated_indices_col = 'repeated_indices'
-      from_table = f"""
-        (
-          SELECT
-            {data_select if not only_keys else ''}
-            UNNEST(RANGE(ARRAY_LENGTH({inner_repeated_col}))) as {repeated_indices_col},
-            {UUID_COLUMN}
-          FROM t
-          {where_query}
-        )
-      """
-      leaf_select = f'{value_column} as {value_column_alias}'
-    else:
-      value_column = self._path_to_col(path, quote_each_part=True)
-      leaf_select = f'{value_column} as {value_column_alias}'
-      from_table = 't'
-
-    query = f"""
-    SELECT
-      {UUID_COLUMN},
-      {f'{repeated_indices_col},' if repeated_indices_col else ''}
-      {leaf_select if not only_keys else ''}
-    FROM {from_table}
-    {where_query}
-    """
-    df = self._query_df(query)
-    # DuckDB returns np.nan for missing field in string column, replace with None for correctness.
-    # TODO(https://github.com/duckdb/duckdb/issues/4066): Remove this once DuckDB/Pandas is fixed.
-    for col in df.columns:
-      if is_object_dtype(df[col]):
-        df[col].replace(np.nan, None, inplace=True)
-    return SelectLeafsResult(
-        df=df, value_column=value_column_alias, repeated_idxs_col=repeated_indices_col)
-
-  def _validate_filters(self, filters: Sequence[Filter], col_aliases: dict[str, bool]) -> None:
+  def _validate_filters(self, filters: Sequence[Filter], col_aliases: set[str]) -> None:
     manifest = self.manifest()
     for filter in filters:
       if filter.path[0] in col_aliases:
@@ -609,7 +433,9 @@ class DatasetDuckDB(DatasetDB):
     if not leaf or not leaf.dtype:
       raise ValueError(f'Leaf "{path}" not found in dataset')
 
-    inner_select = make_select_column(path)
+    inner_select, _ = self._create_select([Column(path, alias='val')],
+                                          flatten=True,
+                                          resolve_span=True)
     # Compute approximate count by sampling the data to avoid OOM.
     sample_size = SAMPLE_SIZE_DISTINCT_COUNT
     avg_length_query = ''
@@ -618,12 +444,12 @@ class DatasetDuckDB(DatasetDB):
 
     approx_count_query = f"""
       SELECT approx_count_distinct(val) as approxCountDistinct {avg_length_query}
-      FROM (SELECT {inner_select} AS val FROM t LIMIT {sample_size});
+      FROM (SELECT {inner_select} FROM t LIMIT {sample_size});
     """
     row = self._query(approx_count_query)[0]
     approx_count_distinct = row[0]
 
-    total_count_query = f'SELECT count(val) FROM (SELECT {inner_select} AS val FROM t)'
+    total_count_query = f'SELECT count(val) FROM (SELECT {inner_select} FROM t)'
     total_count = self._query(total_count_query)[0][0]
 
     # Adjust the counts for the sample size.
@@ -639,7 +465,7 @@ class DatasetDuckDB(DatasetDB):
     if is_ordinal(leaf.dtype):
       min_max_query = f"""
         SELECT MIN(val) AS minVal, MAX(val) AS maxVal
-        FROM (SELECT {inner_select} AS val FROM t);
+        FROM (SELECT {inner_select} FROM t);
       """
       row = self._query(min_max_query)[0]
       result.min_val, result.max_val = row
@@ -694,7 +520,7 @@ class DatasetDuckDB(DatasetDB):
     value_column = 'value'
 
     limit_query = f'LIMIT {limit}' if limit else ''
-    inner_select = make_select_column(path)
+    inner_select = _make_select_column(path)
     query = f"""
       SELECT {outer_select} AS {value_column}, COUNT() AS {count_column}
       FROM (SELECT {inner_select} AS {inner_val} FROM t)
@@ -717,7 +543,9 @@ class DatasetDuckDB(DatasetDB):
                   sort_by: Optional[Sequence[Path]] = None,
                   sort_order: Optional[SortOrder] = SortOrder.DESC,
                   limit: Optional[int] = None,
-                  offset: Optional[int] = 0) -> SelectRowsResult:
+                  offset: Optional[int] = 0,
+                  task_id: Optional[TaskId] = None,
+                  resolve_span: bool = False) -> SelectRowsResult:
     if not columns:
       # Select all columns.
       columns = list(self.manifest().data_schema.fields.keys())
@@ -729,16 +557,18 @@ class DatasetDuckDB(DatasetDB):
       cols.append(column_from_identifier(UUID_COLUMN))
 
     self._validate_columns(cols)
-    select_query, col_aliases = self._create_select(cols)
+    select_query, columns_to_merge = self._create_select(
+        cols, flatten=False, resolve_span=resolve_span)
     con = self.con.cursor()
     query = con.sql(f'SELECT {select_query} FROM t')
 
-    filters, transform_filters = self._normalize_filters(filters, col_aliases)
+    col_aliases = set(columns_to_merge.keys())
+    udf_aliases = set(col.alias for col in cols if col.transform)
+    filters, udf_filters = self._normalize_filters(filters, col_aliases, udf_aliases)
     filter_queries = self._create_where(filters)
     if filter_queries:
       query = query.filter(' AND '.join(filter_queries))
 
-    sort_by_transform = False
     sort_by_paths = [normalize_path(path) for path in (sort_by or [])]
     sort_cols_after_udf: list[str] = []
     if sort_by_paths:
@@ -759,8 +589,7 @@ class DatasetDuckDB(DatasetDB):
       for sort_by_path in sort_by_paths:
         sort_col = self._path_to_col(sort_by_path)
         # Separate sort columns into two groups: those that need to be sorted before and after UDFs.
-        if sort_by_transform or col_aliases.get(str(sort_by_path[0])):
-          sort_by_transform = True
+        if str(sort_by_path[0]) in udf_aliases:
           sort_cols_after_udf.append(sort_col)
         else:
           sort_cols_before_udf.append(sort_col)
@@ -774,10 +603,12 @@ class DatasetDuckDB(DatasetDB):
     # Download the data so we can run UDFs on it in Python.
     df = query.df()
 
+    already_sorted = False
+
     # Run UDFs on the transformed columns.
-    transform_columns = [col for col in cols if col.transform]
-    for transform_col in transform_columns:
-      transform = transform_col.transform
+    udf_columns = [col for col in cols if col.transform]
+    for udf_col in udf_columns:
+      transform = udf_col.transform
 
       if isinstance(transform, SignalTransform):
         signal = transform.signal
@@ -787,50 +618,67 @@ class DatasetDuckDB(DatasetDB):
                                                      signal.embedding_name)
           self._concept_model_db.sync(concept_model)
 
-        signal_column = transform_col.alias
+        signal_column = udf_col.alias
         input = df[signal_column]
 
         with DebugTimer(f'Computing signal "{signal}"'):
           if signal.vector_based:
             if signal.embedding is None:
               raise ValueError('`Signal.embedding` must be defined for embedding-based signals.')
-            vector_store = self._get_vector_store(transform_col.feature, signal.embedding)
+            vector_store = self._get_vector_store(udf_col.feature, signal.embedding)
 
             # If we are sorting by the topk of a signal column, we can utilize the vector store
             # via `signal.vector_compute_topk` and then use the topk to filter the dataframe. This
             # is much faster than computing the signal for all rows and then sorting.
             if self._sorting_by_topk_of_signal(limit, sort_order, sort_cols_after_udf,
                                                signal_column):
+              already_sorted = True
               k = (limit or 0) + (offset or 0)
               topk = signal.vector_compute_topk(k, vector_store)
-              uuids = [uuid for (uuid, _) in topk]
-              flat_scores: Iterable[Optional[SignalOut]] = [score for _, score in topk]
+              unique_uuids = list(dict.fromkeys([key[0] for key, _ in topk]))
               df.set_index(UUID_COLUMN, drop=False, inplace=True)
-              # Filter the dataframe only by the topk uuids.
-              df = df.loc[uuids]
-              input = df[signal_column]
+              # Filter the dataframe by uuids that have at least one entity in top k.
+              df = df.loc[unique_uuids]
+              for key, score in topk:
+                # Walk a deep nested array and put the score at the right location.
+                deep_array = df[signal_column]
+                for key_part in key[:-1]:
+                  deep_array = deep_array[key_part]
+                deep_array[key[-1]] = score
             else:
               flat_keys = flatten_keys(df[UUID_COLUMN], input)
-              flat_scores = signal.vector_compute(flat_keys, vector_store)
+              signal_out = signal.vector_compute(flat_keys, vector_store)
+              # Add progress.
+              if task_id is not None:
+                signal_out = progress(signal_out, task_id=task_id, estimated_len=len(flat_keys))
+              df[signal_column] = unflatten(signal_out, input)
           else:
-            flat_input = cast(Iterable[RichData], flatten(input))
-            flat_scores = signal.compute(flat_input)
+            flat_input = cast(list[RichData], flatten(input))
+            signal_out = signal.compute(flat_input)
+            # Add progress.
+            if task_id is not None:
+              signal_out = progress(signal_out, task_id=task_id, estimated_len=len(flat_input))
+            signal_out = list(signal_out)
 
-          df[signal_column] = unflatten(flat_scores, input)
-
+            if len(signal_out) != len(flat_input):
+              raise ValueError(
+                  f'The signal generated {len(signal_out)} values but the input data had '
+                  f"{len(flat_input)} values. This means the signal either didn't generate a "
+                  '"None" for a sparse output, or generated too many items.')
+            df[signal_column] = unflatten(signal_out, input)
       else:
         raise ValueError(f'Unsupported transform: {transform}')
 
-    if transform_filters or sort_cols_after_udf:
+    if udf_filters or sort_cols_after_udf:
       # Re-upload the udf outputs to duckdb so we can filter/sort on them.
       query = con.from_df(df)
 
-      if transform_filters:
-        transform_filter_queries = self._create_where(transform_filters)
-        if transform_filter_queries:
-          query = query.filter(' AND '.join(transform_filter_queries))
+      if udf_filters:
+        udf_filter_queries = self._create_where(udf_filters)
+        if udf_filter_queries:
+          query = query.filter(' AND '.join(udf_filter_queries))
 
-      if sort_cols_after_udf:
+      if not already_sorted and sort_cols_after_udf:
         if not sort_order:
           raise ValueError(
               'Sort order is undefined but sort by is defined. Please define a sort_order')
@@ -841,6 +689,19 @@ class DatasetDuckDB(DatasetDB):
 
       df = query.df()
 
+    for final_col_name, temp_columns in columns_to_merge.items():
+      for temp_col_name in temp_columns:
+        # If the temp col name is the same as the final name, we can skip merging. This happens when
+        # we select a source leaf column.
+        if temp_col_name == final_col_name:
+          continue
+
+        if final_col_name not in df:
+          df[final_col_name] = df[temp_col_name]
+        else:
+          df[final_col_name] = merge_values(df[final_col_name], df[temp_col_name])
+        del df[temp_col_name]
+
     query.close()
     con.close()
 
@@ -849,35 +710,77 @@ class DatasetDuckDB(DatasetDB):
       if is_object_dtype(df[col]):
         df[col].replace(np.nan, None, inplace=True)
 
-    item_rows = (row.to_dict() for _, row in df.iterrows())
-    return SelectRowsResult(item_rows)
+    return SelectRowsResult(df)
 
   @override
   def media(self, item_id: str, leaf_path: Path) -> MediaResult:
     raise NotImplementedError('Media is not yet supported for the DuckDB implementation.')
 
-  def _create_select(self, columns: list[Column]) -> tuple[str, dict[str, bool]]:
-    """Create the select statement."""
+  def _create_select_column(self, column: Column, manifest: DatasetManifest, flatten: bool,
+                            resolve_span: bool) -> tuple[str, list[str]]:
+    leafs = manifest.data_schema.leafs
+    path = column.feature
+    is_span = (path in leafs and leafs[path].dtype == DataType.STRING_SPAN)
+    span_field = leafs[path] if resolve_span and is_span else None
+    # We doing a vector-based computation, we do not need to select the actual data, just the uuids
+    # plus an arbitrarily nested array of `None`s`.
+    empty = bool(
+        column.transform and isinstance(column.transform, SignalTransform) and
+        column.transform.signal.vector_based)
     select_queries: list[str] = []
-    alias_and_transform: dict[str, bool] = {}
+    temp_column_names: list[str] = []
+
+    parquet_manifests: list[Union[SourceManifest, SignalManifest]] = [
+        self._source_manifest, *self._signal_manifests
+    ]
+
+    for m in parquet_manifests:
+      if not schema_contains_path(m.data_schema, path):
+        # Skip this parquet file if it doesn't contain the path.
+        continue
+
+      if isinstance(m, SignalManifest) and column.feature == (UUID_COLUMN,):
+        # Do not select UUID from the signal because it's already in the source.
+        continue
+
+      if path_is_from_lilac(path):
+        m = cast(SignalManifest, m)
+        select_path = (m.parquet_id, *path[1:])
+        if path in leafs:
+          # Leafs only live in a single manifest so we don't need to namespace.
+          temp_column_name = column.alias
+        else:
+          temp_column_name = f'{column.alias}/{m.parquet_id}'
+      else:
+        select_path = column.feature
+        temp_column_name = column.alias
+      temp_column_names.append(temp_column_name)
+      col = _make_select_column(select_path, flatten=flatten, empty=empty, span_field=span_field)
+      select_queries.append(f'{col} AS "{temp_column_name}"')
+
+    return ', '.join(select_queries), temp_column_names
+
+  def _create_select(self, columns: list[Column], flatten: bool,
+                     resolve_span: bool) -> tuple[str, dict[str, list[str]]]:
+    """Create the select statement."""
+    manifest = self.manifest()
+    # Map a final column name to a list of temporary namespaced column names that need to be merged.
+    alias_to_temp_col_names: dict[str, list[str]] = {}
+    select_queries: list[str] = []
 
     for column in columns:
-      alias_and_transform[column.alias] = bool(column.transform)
-      empty = bool(
-          column.transform and isinstance(column.transform, SignalTransform) and
-          column.transform.signal.vector_based)
-      col = make_select_column(column.feature, flatten=False, empty=empty)
-      select_queries.append(f'{col} AS "{column.alias}"')
+      select_str, temp_column_names = self._create_select_column(column, manifest, flatten,
+                                                                 resolve_span)
+      alias_to_temp_col_names[column.alias] = temp_column_names
+      select_queries.append(select_str)
+    return ', '.join(select_queries), alias_to_temp_col_names
 
-    return ', '.join(select_queries), alias_and_transform
-
-  def _normalize_filters(self,
-                         filter_likes: Optional[Sequence[FilterLike]] = None,
-                         col_aliases: dict[str, bool] = {}) -> tuple[list[Filter], list[Filter]]:
+  def _normalize_filters(self, filter_likes: Optional[Sequence[FilterLike]], col_aliases: set[str],
+                         udf_aliases: set[str]) -> tuple[list[Filter], list[Filter]]:
     """Normalize `FilterLike` to `Filter` and split into filters on source and filters on UDFs."""
     filter_likes = filter_likes or []
     filters: list[Filter] = []
-    transform_filters: list[Filter] = []
+    udf_filters: list[Filter] = []
 
     for filter in filter_likes:
       # Normalize `FilterLike` to `Filter`.
@@ -888,14 +791,13 @@ class DatasetDuckDB(DatasetDB):
         elif isinstance(path_tuple, Column):
           path_tuple = path_tuple.feature
         filter = Filter(path=path_tuple, comparison=filter[1], value=filter[2])
-      is_transform_filter = col_aliases.get(str(filter.path[0]), False)
-      if is_transform_filter:
-        transform_filters.append(filter)
+      if str(filter.path[0]) in udf_aliases:
+        udf_filters.append(filter)
       else:
         filters.append(filter)
 
     self._validate_filters(filters, col_aliases)
-    return filters, transform_filters
+    return filters, udf_filters
 
   def _create_where(self, filters: list[Filter]) -> list[str]:
     if not filters:
@@ -951,7 +853,8 @@ class DatasetDuckDB(DatasetDB):
 
 def _inner_select(sub_paths: list[PathTuple],
                   inner_var: Optional[str] = None,
-                  empty: bool = False) -> str:
+                  empty: bool = False,
+                  span_field: Optional[Field] = None) -> str:
   """Recursively generate the inner select statement for a list of sub paths."""
   current_sub_path = sub_paths[0]
   lambda_var = inner_var + 'x' if inner_var else 'x'
@@ -962,9 +865,15 @@ def _inner_select(sub_paths: list[PathTuple],
   # Select the path inside structs. E.g. x['a']['b']['c'] given current_sub_path = [a, b, c].
   path_key = inner_var + ''.join([f"['{p}']" for p in current_sub_path])
   if len(sub_paths) == 1:
+    if span_field:
+      if not span_field.derived_from:
+        raise ValueError('derived_from from must be specified for span.')
+      derived_col = _make_select_column(span_field.derived_from)
+      path_key = (f'{derived_col}[{path_key}.{TEXT_SPAN_START_FEATURE}+1:'
+                  f'{path_key}.{TEXT_SPAN_END_FEATURE}]')
     return 'NULL' if empty else path_key
   return (f'list_transform({path_key}, {lambda_var} -> '
-          f'{_inner_select(sub_paths[1:], lambda_var, empty)})')
+          f'{_inner_select(sub_paths[1:], lambda_var, empty, span_field)})')
 
 
 def _split_path_into_subpaths_of_lists(leaf_path: PathTuple) -> list[PathTuple]:
@@ -983,17 +892,22 @@ def _split_path_into_subpaths_of_lists(leaf_path: PathTuple) -> list[PathTuple]:
   return sub_paths
 
 
-def make_select_column(leaf_path: Path, flatten: bool = True, empty: bool = False) -> str:
+def _make_select_column(leaf_path: Path,
+                        flatten: bool = True,
+                        empty: bool = False,
+                        span_field: Optional[Field] = None) -> str:
   """Create a select column for a leaf path.
 
   Args:
     leaf_path: A path to a leaf feature. E.g. ['a', 'b', 'c'].
     flatten: Whether to flatten the result.
     empty: Whether to return an empty list (used for embedding signals that don't need the data).
+    span_field: The field that the span is derived from. If specified, the span will be resolved
+      to a substring of the original string.
   """
   path = normalize_path(leaf_path)
   sub_paths = _split_path_into_subpaths_of_lists(path)
-  selection = _inner_select(sub_paths, None, empty)
+  selection = _inner_select(sub_paths, None, empty, span_field)
   # We only flatten when the result of a nested list to avoid segfault.
   is_result_nested_list = len(sub_paths) >= 3  # E.g. subPaths = [[a, b, c], *, *].
   if flatten and is_result_nested_list:
@@ -1005,43 +919,22 @@ def make_select_column(leaf_path: Path, flatten: bool = True, empty: bool = Fals
   return selection
 
 
-def _get_repeated_key(row_id: str, repeated_idxs: list[int]) -> str:
-  if not repeated_idxs:
-    return row_id
-  return row_id + '_' + ','.join(map(str, repeated_idxs))
-
-
-def _flatten_keys(uuid: str, nested_input: Iterable, repeated_idxs: list[int]) -> list[str]:
+def _flatten_keys(uuid: str, nested_input: Iterable, location: list[int]) -> list[PathTuple]:
   if is_primitive(nested_input):
-    return [_get_repeated_key(uuid, repeated_idxs)]
+    return [(uuid, *location)]
   else:
-    result: list[str] = []
+    result: list[PathTuple] = []
     for i, input in enumerate(nested_input):
-      result.extend(_flatten_keys(uuid, input, [*repeated_idxs, i]))
+      result.extend(_flatten_keys(uuid, input, [*location, i]))
     return result
 
 
-def flatten_keys(uuids: Iterable[str], nested_input: Iterable) -> list[str]:
+def flatten_keys(uuids: Iterable[str], nested_input: Iterable) -> list[PathTuple]:
   """Flatten the uuid keys of a nested input."""
-  result: list[str] = []
+  result: list[PathTuple] = []
   for uuid, input in zip(uuids, nested_input):
     result.extend(_flatten_keys(uuid, input, []))
   return result
-
-
-def _get_keys_from_leafs(leafs_df: pd.DataFrame,
-                         select_leafs_result: SelectLeafsResult) -> Iterable[str]:
-  """Compute the keys from the dataframe and select leafs result, adding indices to keys."""
-  # Add the repeated indices to the create a repeated key so we can store different values for the
-  # same row uuid.
-  if select_leafs_result.repeated_idxs_col:
-    # Add the repeated indices to the create a repeated key so we can store different values for the
-    # same row uuid.
-    return leafs_df.apply(
-        lambda row: _get_repeated_key(row[UUID_COLUMN],
-                                      [row[select_leafs_result.repeated_idxs_col]]),
-        axis=1)
-  return leafs_df[UUID_COLUMN]
 
 
 def read_source_manifest(dataset_path: str) -> SourceManifest:
@@ -1086,9 +979,8 @@ class SignalManifest(BaseModel):
   # List of a parquet filepaths storing the data. The paths are relative to the manifest.
   files: list[str]
 
-  # The column name that this signal is stored in. This provides the top-level path to the computed
-  # signal values.
-  top_level_column_name: str
+  # An identifier for this parquet table. Will be used as the view name in SQL.
+  parquet_id: str
 
   data_schema: Schema
   signal: Signal
@@ -1108,3 +1000,28 @@ class EntityIndexManifest(BaseModel):
   # implementation details of the duckdb implementation so we can add more metadata. This could be
   # be removed if we don't need to add more metadata.
   entity_index: EntityIndex
+
+
+def _merge_cells(dest_cell: ItemValue, source_cell: ItemValue) -> None:
+  if isinstance(dest_cell, dict):
+    if not isinstance(source_cell, dict):
+      raise ValueError('Failed to merge cells. Destination is a dict, but source is not.')
+    for key, value in source_cell.items():
+      if key not in dest_cell:
+        dest_cell[key] = value
+      else:
+        _merge_cells(dest_cell[key], value)
+  elif isinstance(dest_cell, list):
+    if not isinstance(source_cell, list):
+      raise ValueError('Failed to merge cells. Destination is a list, but source is not.')
+    for dest_subcell, source_subcell in zip(dest_cell, source_cell):
+      _merge_cells(dest_subcell, source_subcell)
+  else:
+    raise ValueError(f'Cannot merge source "{source_cell!r}" into destination "{dest_cell!r}"')
+
+
+def merge_values(destination: pd.Series, source: pd.Series) -> pd.Series:
+  """Merge two series of values recursively."""
+  for dest_cell, source_cell in zip(destination, source):
+    _merge_cells(dest_cell, source_cell)
+  return destination

@@ -19,21 +19,20 @@ from ..embeddings.embedding_registry import (
 )
 from ..embeddings.vector_store import VectorStore
 from ..schema import (
-    PATH_WILDCARD,
-    TEXT_SPAN_END_FEATURE,
-    TEXT_SPAN_START_FEATURE,
+    ENTITY_FEATURE_KEY,
+    LILAC_COLUMN,
     UUID_COLUMN,
     DataType,
     EnrichmentType,
-    Entity,
-    EntityField,
     Field,
     Item,
     ItemValue,
+    PathTuple,
     RichData,
     Schema,
     SignalOut,
-    TextSpan,
+    TextEntity,
+    TextEntityField,
 )
 from ..signals.signal import Signal
 from ..signals.signal_registry import clear_signal_registry, register_signal
@@ -70,7 +69,7 @@ SIMPLE_ITEMS: list[Item] = [{
     'bool': True,
     'float': 2.0
 }, {
-    UUID_COLUMN: '2',
+    UUID_COLUMN: '3',
     'str': 'b',
     'int': 2,
     'bool': True,
@@ -107,10 +106,27 @@ class TestEmbedding(Embedding):
     return np.array([STR_EMBEDDINGS[cast(str, example)] for example in data])
 
 
+class LengthSignal(Signal):
+  name = 'length_signal'
+  enrichment_type = EnrichmentType.TEXT
+  vector_based = False
+
+  call_count: int = 0
+
+  def fields(self) -> Field:
+    return Field(dtype=DataType.INT32)
+
+  def compute(self, data: Iterable[RichData]) -> Iterable[Optional[SignalOut]]:
+    for text_content in data:
+      self.call_count += 1
+      yield len(text_content)
+
+
 @pytest.fixture(scope='module', autouse=True)
 def setup_teardown() -> Iterable[None]:
   # Setup.
   register_signal(TestSignal)
+  register_signal(LengthSignal)
   register_signal(TestSplitterWithLen)
   register_signal(TestEmbeddingSumSignal)
   register_signal(TestEntitySignal)
@@ -148,7 +164,7 @@ class SelectRowsSuite:
 
     result = db.select_rows([UUID_COLUMN])
 
-    assert list(result) == [{UUID_COLUMN: '1'}, {UUID_COLUMN: '2'}, {UUID_COLUMN: '2'}]
+    assert list(result) == [{UUID_COLUMN: '1'}, {UUID_COLUMN: '2'}, {UUID_COLUMN: '3'}]
 
   def test_select_ids_with_limit_and_offset(self, tmp_path: pathlib.Path,
                                             db_cls: Type[DatasetDB]) -> None:
@@ -178,19 +194,7 @@ class SelectRowsSuite:
     id_filter = (UUID_COLUMN, Comparison.EQUALS, '2')
     result = db.select_rows(filters=[id_filter])
 
-    assert list(result) == [{
-        UUID_COLUMN: '2',
-        'str': 'b',
-        'int': 2,
-        'bool': True,
-        'float': 2.0
-    }, {
-        UUID_COLUMN: '2',
-        'str': 'b',
-        'int': 2,
-        'bool': True,
-        'float': 1.0
-    }]
+    assert list(result) == [{UUID_COLUMN: '2', 'str': 'b', 'int': 2, 'bool': True, 'float': 2.0}]
 
     id_filter = (UUID_COLUMN, Comparison.EQUALS, b'f')
     result = db.select_rows(filters=[id_filter])
@@ -200,7 +204,7 @@ class SelectRowsSuite:
   def test_columns(self, tmp_path: pathlib.Path, db_cls: Type[DatasetDB]) -> None:
     db = make_db(db_cls, tmp_path, SIMPLE_ITEMS, SIMPLE_SCHEMA)
 
-    result = db.select_rows(columns=['str', 'float'])
+    result = db.select_rows(['str', 'float'])
 
     assert list(result) == [{
         UUID_COLUMN: '1',
@@ -211,7 +215,7 @@ class SelectRowsSuite:
         'str': 'b',
         'float': 2.0
     }, {
-        UUID_COLUMN: '2',
+        UUID_COLUMN: '3',
         'str': 'b',
         'float': 1.0
     }]
@@ -235,30 +239,35 @@ class SelectRowsSuite:
         num_items=3)
 
     test_signal = TestSignal()
-    db.compute_signal_column(signal=test_signal, column='str')
+    db.compute_signal_column(test_signal, 'str')
 
-    result = db.select_rows(columns=['str', 'test_signal(str)'])
-
+    result = db.select_rows(['str', (LILAC_COLUMN, 'str')])
     assert list(result) == [{
         UUID_COLUMN: '1',
         'str': 'a',
-        'test_signal(str)': {
-            'len': 1,
-            'flen': 1.0
+        f'{LILAC_COLUMN}.str': {
+            'test_signal': {
+                'len': 1,
+                'flen': 1.0
+            }
         }
     }, {
         UUID_COLUMN: '2',
         'str': 'b',
-        'test_signal(str)': {
-            'len': 1,
-            'flen': 1.0
+        f'{LILAC_COLUMN}.str': {
+            'test_signal': {
+                'len': 1,
+                'flen': 1.0
+            }
         }
     }, {
-        UUID_COLUMN: '2',
+        UUID_COLUMN: '3',
         'str': 'b',
-        'test_signal(str)': {
-            'len': 1,
-            'flen': 1.0
+        f'{LILAC_COLUMN}.str': {
+            'test_signal': {
+                'len': 1,
+                'flen': 1.0
+            }
         }
     }]
 
@@ -273,39 +282,46 @@ class SelectRowsSuite:
                 'int': Field(dtype=DataType.INT64),
                 'bool': Field(dtype=DataType.BOOLEAN),
                 'float': Field(dtype=DataType.FLOAT64),
-                'test_signal(str)': Field(
+                LILAC_COLUMN: Field(
                     fields={
-                        'len': Field(dtype=DataType.INT32, derived_from=('str',)),
-                        'flen': Field(dtype=DataType.FLOAT32, derived_from=('str',))
-                    },
-                    derived_from=('str',))
+                        'str': Field(
+                            fields={
+                                'test_signal': Field(
+                                    fields={
+                                        'len': Field(dtype=DataType.INT32, derived_from=('str',)),
+                                        'flen': Field(
+                                            dtype=DataType.FLOAT32, derived_from=('str',))
+                                    },
+                                    derived_from=('str',))
+                            })
+                    })
             }),
         embedding_manifest=EmbeddingIndexerManifest(indexes=[]),
         entity_indexes=[],
         num_items=3)
 
     # Select a specific signal leaf test_signal.flen.
-    result = db.select_rows(columns=['str', ('test_signal(str)', 'flen')])
+    result = db.select_rows(['str', (LILAC_COLUMN, 'str', 'test_signal', 'flen')])
 
     assert list(result) == [{
         UUID_COLUMN: '1',
         'str': 'a',
-        'test_signal(str).flen': 1.0
+        f'{LILAC_COLUMN}.str.test_signal.flen': 1.0
     }, {
         UUID_COLUMN: '2',
         'str': 'b',
-        'test_signal(str).flen': 1.0
+        f'{LILAC_COLUMN}.str.test_signal.flen': 1.0
     }, {
-        UUID_COLUMN: '2',
+        UUID_COLUMN: '3',
         'str': 'b',
-        'test_signal(str).flen': 1.0
+        f'{LILAC_COLUMN}.str.test_signal.flen': 1.0
     }]
 
     # Select multiple signal leafs with aliasing.
-    result = db.select_rows(columns=[
+    result = db.select_rows([
         'str',
-        Column(('test_signal(str)', 'flen'), alias='flen'),
-        Column(('test_signal(str)', 'len'), alias='len')
+        Column((LILAC_COLUMN, 'str', 'test_signal', 'flen'), alias='flen'),
+        Column((LILAC_COLUMN, 'str', 'test_signal', 'len'), alias='len')
     ])
 
     assert list(result) == [{
@@ -319,10 +335,246 @@ class SelectRowsSuite:
         'flen': 1.0,
         'len': 1
     }, {
-        UUID_COLUMN: '2',
+        UUID_COLUMN: '3',
         'str': 'b',
         'flen': 1.0,
         'len': 1
+    }]
+
+  def test_merge_values(self, tmp_path: pathlib.Path, db_cls: Type[DatasetDB]) -> None:
+    db = make_db(
+        db_cls,
+        tmp_path,
+        items=[{
+            UUID_COLUMN: '1',
+            'text': 'hello'
+        }, {
+            UUID_COLUMN: '2',
+            'text': 'everybody'
+        }],
+        schema=Schema(fields={
+            UUID_COLUMN: Field(dtype=DataType.STRING),
+            'text': Field(dtype=DataType.STRING),
+        }))
+    test_signal = TestSignal()
+    db.compute_signal_column(test_signal, 'text')
+    length_signal = LengthSignal()
+    db.compute_signal_column(length_signal, 'text')
+
+    result = db.select_rows(['text', LILAC_COLUMN])
+    assert list(result) == [{
+        UUID_COLUMN: '1',
+        'text': 'hello',
+        LILAC_COLUMN: {
+            'text': {
+                'length_signal': 5,
+                'test_signal': {
+                    'len': 5,
+                    'flen': 5.0
+                }
+            }
+        }
+    }, {
+        UUID_COLUMN: '2',
+        'text': 'everybody',
+        LILAC_COLUMN: {
+            'text': {
+                'length_signal': 9,
+                'test_signal': {
+                    'len': 9,
+                    'flen': 9.0
+                }
+            }
+        }
+    }]
+
+    # Test subselection.
+    result = db.select_rows(['text', (LILAC_COLUMN, 'text')])
+    assert list(result) == [{
+        UUID_COLUMN: '1',
+        'text': 'hello',
+        f'{LILAC_COLUMN}.text': {
+            'length_signal': 5,
+            'test_signal': {
+                'len': 5,
+                'flen': 5.0
+            }
+        }
+    }, {
+        UUID_COLUMN: '2',
+        'text': 'everybody',
+        f'{LILAC_COLUMN}.text': {
+            'length_signal': 9,
+            'test_signal': {
+                'len': 9,
+                'flen': 9.0
+            }
+        }
+    }]
+
+    result = db.select_rows([
+        'text', (LILAC_COLUMN, 'text', 'test_signal', 'flen'),
+        (LILAC_COLUMN, 'text', 'test_signal', 'len')
+    ])
+    assert list(result) == [{
+        UUID_COLUMN: '1',
+        'text': 'hello',
+        f'{LILAC_COLUMN}.text.test_signal.flen': 5.0,
+        f'{LILAC_COLUMN}.text.test_signal.len': 5
+    }, {
+        UUID_COLUMN: '2',
+        'text': 'everybody',
+        f'{LILAC_COLUMN}.text.test_signal.flen': 9.0,
+        f'{LILAC_COLUMN}.text.test_signal.len': 9
+    }]
+
+    # Test subselection with aliasing.
+    result = db.select_rows(
+        columns=['text',
+                 Column((LILAC_COLUMN, 'text', 'test_signal', 'len'), alias='metadata')])
+    assert list(result) == [{
+        UUID_COLUMN: '1',
+        'text': 'hello',
+        'metadata': 5
+    }, {
+        UUID_COLUMN: '2',
+        'text': 'everybody',
+        'metadata': 9
+    }]
+
+    result = db.select_rows(
+        columns=['text', Column((LILAC_COLUMN, 'text'), alias='text_enrichment')])
+    assert list(result) == [{
+        UUID_COLUMN: '1',
+        'text': 'hello',
+        'text_enrichment': {
+            'length_signal': 5,
+            'test_signal': {
+                'len': 5,
+                'flen': 5.0
+            }
+        }
+    }, {
+        UUID_COLUMN: '2',
+        'text': 'everybody',
+        'text_enrichment': {
+            'length_signal': 9,
+            'test_signal': {
+                'len': 9,
+                'flen': 9.0
+            }
+        }
+    }]
+
+  def test_merge_array_values(self, tmp_path: pathlib.Path, db_cls: Type[DatasetDB]) -> None:
+    db = make_db(
+        db_cls,
+        tmp_path,
+        items=[{
+            UUID_COLUMN: '1',
+            'texts': ['hello', 'everybody']
+        }, {
+            UUID_COLUMN: '2',
+            'texts': ['a', 'bc', 'def']
+        }],
+        schema=Schema(
+            fields={
+                UUID_COLUMN: Field(dtype=DataType.STRING),
+                'texts': Field(repeated_field=Field(dtype=DataType.STRING)),
+            }))
+
+    db.compute_signal_column(TestSignal(), ('texts', '*'))
+    db.compute_signal_column(LengthSignal(), ('texts', '*'))
+
+    assert db.manifest() == DatasetManifest(
+        namespace=TEST_NAMESPACE,
+        dataset_name=TEST_DATASET_NAME,
+        data_schema=Schema(
+            fields={
+                UUID_COLUMN: Field(dtype=DataType.STRING),
+                'texts': Field(repeated_field=Field(dtype=DataType.STRING)),
+                LILAC_COLUMN: Field(
+                    fields={
+                        'texts': Field(
+                            repeated_field=Field(
+                                fields={
+                                    'length_signal': Field(
+                                        dtype=DataType.INT32, derived_from=('texts', '*')),
+                                    'test_signal': Field(
+                                        fields={
+                                            'len': Field(
+                                                dtype=DataType.INT32, derived_from=('texts', '*')),
+                                            'flen': Field(
+                                                dtype=DataType.FLOAT32, derived_from=('texts', '*'))
+                                        },
+                                        derived_from=('texts', '*'))
+                                }))
+                    })
+            }),
+        embedding_manifest=EmbeddingIndexerManifest(indexes=[]),
+        entity_indexes=[],
+        num_items=2)
+
+    result = db.select_rows(['texts', LILAC_COLUMN])
+    assert list(result) == [{
+        UUID_COLUMN: '1',
+        'texts': ['hello', 'everybody'],
+        LILAC_COLUMN: {
+            'texts': [{
+                'length_signal': 5,
+                'test_signal': {
+                    'len': 5,
+                    'flen': 5.0
+                }
+            }, {
+                'length_signal': 9,
+                'test_signal': {
+                    'len': 9,
+                    'flen': 9.0
+                }
+            }]
+        }
+    }, {
+        UUID_COLUMN: '2',
+        'texts': ['a', 'bc', 'def'],
+        LILAC_COLUMN: {
+            'texts': [{
+                'length_signal': 1,
+                'test_signal': {
+                    'len': 1,
+                    'flen': 1.0
+                }
+            }, {
+                'length_signal': 2,
+                'test_signal': {
+                    'len': 2,
+                    'flen': 2.0
+                }
+            }, {
+                'length_signal': 3,
+                'test_signal': {
+                    'len': 3,
+                    'flen': 3.0
+                }
+            }]
+        }
+    }]
+
+    # Test subselection.
+    result = db.select_rows([
+        'texts', (LILAC_COLUMN, 'texts', '*', 'length_signal'),
+        (LILAC_COLUMN, 'texts', '*', 'test_signal', 'flen')
+    ])
+    assert list(result) == [{
+        UUID_COLUMN: '1',
+        'texts': ['hello', 'everybody'],
+        f'{LILAC_COLUMN}.texts.*.test_signal.flen': [5.0, 9.0],
+        f'{LILAC_COLUMN}.texts.*.length_signal': [5, 9]
+    }, {
+        UUID_COLUMN: '2',
+        'texts': ['a', 'bc', 'def'],
+        f'{LILAC_COLUMN}.texts.*.test_signal.flen': [1.0, 2.0, 3.0],
+        f'{LILAC_COLUMN}.texts.*.length_signal': [1, 2, 3]
     }]
 
   def test_signal_on_repeated_field(self, tmp_path: pathlib.Path, db_cls: Type[DatasetDB]) -> None:
@@ -343,7 +595,7 @@ class SelectRowsSuite:
             }))
     test_signal = TestSignal()
     # Run the signal on the repeated field.
-    db.compute_signal_column(signal=test_signal, column=('text', '*'))
+    db.compute_signal_column(test_signal, ('text', '*'))
 
     # Check the enriched dataset manifest has 'text' enriched.
     assert db.manifest() == DatasetManifest(
@@ -353,38 +605,53 @@ class SelectRowsSuite:
             fields={
                 UUID_COLUMN: Field(dtype=DataType.STRING),
                 'text': Field(repeated_field=Field(dtype=DataType.STRING)),
-                'test_signal(text)': Field(
-                    repeated_field=Field(
-                        fields={
-                            'len': Field(dtype=DataType.INT32, derived_from=('text', '*')),
-                            'flen': Field(dtype=DataType.FLOAT32, derived_from=('text', '*'))
-                        },
-                        derived_from=('text', '*')),
-                    derived_from=('text', '*'))
+                LILAC_COLUMN: Field(
+                    fields={
+                        'text': Field(
+                            repeated_field=Field(
+                                fields={
+                                    'test_signal': Field(
+                                        fields={
+                                            'len': Field(
+                                                dtype=DataType.INT32, derived_from=('text', '*')),
+                                            'flen': Field(
+                                                dtype=DataType.FLOAT32, derived_from=('text', '*'))
+                                        },
+                                        derived_from=('text', '*'))
+                                }))
+                    })
             }),
         embedding_manifest=EmbeddingIndexerManifest(indexes=[]),
         entity_indexes=[],
         num_items=2)
 
-    result = db.select_rows(columns=[('test_signal(text)')])
+    result = db.select_rows([(LILAC_COLUMN, 'text', '*')])
 
     assert list(result) == [{
         UUID_COLUMN: '1',
-        'test_signal(text)': [{
-            'len': 5,
-            'flen': 5.0
+        f'{LILAC_COLUMN}.text.*': [{
+            'test_signal': {
+                'len': 5,
+                'flen': 5.0
+            }
         }, {
-            'len': 9,
-            'flen': 9.0
+            'test_signal': {
+                'len': 9,
+                'flen': 9.0
+            }
         }]
     }, {
         UUID_COLUMN: '2',
-        'test_signal(text)': [{
-            'len': 6,
-            'flen': 6.0
+        f'{LILAC_COLUMN}.text.*': [{
+            'test_signal': {
+                'len': 6,
+                'flen': 6.0
+            }
         }, {
-            'len': 10,
-            'flen': 10.0
+            'test_signal': {
+                'len': 10,
+                'flen': 10.0
+            }
         }]
     }]
 
@@ -405,7 +672,7 @@ class SelectRowsSuite:
         }))
 
     signal_col = SignalUDF(TestSignal(), 'text')
-    result = db.select_rows(columns=['text', signal_col])
+    result = db.select_rows(['text', signal_col])
 
     assert list(result) == [{
         UUID_COLUMN: '1',
@@ -443,7 +710,7 @@ class SelectRowsSuite:
     signal_col = SignalUDF(TestSignal(), 'text')
     # Filter by source feature.
     filters: list[FilterTuple] = [('text', Comparison.EQUALS, 'everybody')]
-    result = db.select_rows(columns=['text', signal_col], filters=filters)
+    result = db.select_rows(['text', signal_col], filters=filters)
     assert list(result) == [{
         UUID_COLUMN: '2',
         'text': 'everybody',
@@ -455,7 +722,7 @@ class SelectRowsSuite:
 
     # Filter by transformed feature.
     filters = [(('test_signal(text)', 'len'), Comparison.LESS, 7)]
-    result = db.select_rows(columns=['text', signal_col], filters=filters)
+    result = db.select_rows(['text', signal_col], filters=filters)
 
     assert list(result) == [{
         UUID_COLUMN: '1',
@@ -467,7 +734,7 @@ class SelectRowsSuite:
     }]
 
     filters = [(('test_signal(text)', 'flen'), Comparison.GREATER, 6.0)]
-    result = db.select_rows(columns=['text', signal_col], filters=filters)
+    result = db.select_rows(['text', signal_col], filters=filters)
 
     assert list(result) == [{
         UUID_COLUMN: '2',
@@ -477,21 +744,6 @@ class SelectRowsSuite:
             'flen': 9.0
         }
     }]
-
-  class LengthSignal(Signal):
-    name = 'length_signal'
-    enrichment_type = EnrichmentType.TEXT
-    vector_based = False
-
-    call_count: int = 0
-
-    def fields(self) -> Field:
-      return Field(dtype=DataType.INT32)
-
-    def compute(self, data: Iterable[RichData]) -> Iterable[Optional[SignalOut]]:
-      for text_content in data:
-        self.call_count += 1
-        yield len(text_content)
 
   def test_signal_transform_with_uuid_filter(self, tmp_path: pathlib.Path,
                                              db_cls: Type[DatasetDB]) -> None:
@@ -511,20 +763,20 @@ class SelectRowsSuite:
             'text': Field(dtype=DataType.STRING),
         }))
 
-    signal = SelectRowsSuite.LengthSignal()
+    signal = LengthSignal()
     # Filter by a specific UUID.
     filters: list[FilterTuple] = [(UUID_COLUMN, Comparison.EQUALS, '1')]
-    result = db.select_rows(columns=['text', SignalUDF(signal, 'text')], filters=filters)
+    result = db.select_rows(['text', SignalUDF(signal, 'text')], filters=filters)
     assert list(result) == [{UUID_COLUMN: '1', 'text': 'hello', 'length_signal(text)': 5}]
     assert signal.call_count == 1
 
     filters = [(UUID_COLUMN, Comparison.EQUALS, '2')]
-    result = db.select_rows(columns=['text', SignalUDF(signal, 'text')], filters=filters)
+    result = db.select_rows(['text', SignalUDF(signal, 'text')], filters=filters)
     assert list(result) == [{UUID_COLUMN: '2', 'text': 'everybody', 'length_signal(text)': 9}]
     assert signal.call_count == 1 + 1
 
     # No filters.
-    result = db.select_rows(columns=['text', SignalUDF(signal, 'text')])
+    result = db.select_rows(['text', SignalUDF(signal, 'text')])
     assert list(result) == [{
         UUID_COLUMN: '1',
         'text': 'hello',
@@ -555,11 +807,11 @@ class SelectRowsSuite:
                 'text': Field(repeated_field=Field(dtype=DataType.STRING)),
             }))
 
-    signal = SelectRowsSuite.LengthSignal()
+    signal = LengthSignal()
 
     # Filter by a specific UUID.
     filters: list[FilterTuple] = [(UUID_COLUMN, Comparison.EQUALS, '1')]
-    result = db.select_rows(columns=['text', SignalUDF(signal, ('text', '*'))], filters=filters)
+    result = db.select_rows(['text', SignalUDF(signal, ('text', '*'))], filters=filters)
     assert list(result) == [{
         UUID_COLUMN: '1',
         'text': ['hello', 'hi'],
@@ -569,7 +821,7 @@ class SelectRowsSuite:
 
     # Filter by a specific UUID.
     filters = [(UUID_COLUMN, Comparison.EQUALS, '2')]
-    result = db.select_rows(columns=['text', SignalUDF(signal, ('text', '*'))], filters=filters)
+    result = db.select_rows(['text', SignalUDF(signal, ('text', '*'))], filters=filters)
     assert list(result) == [{
         UUID_COLUMN: '2',
         'text': ['everybody', 'bye', 'test'],
@@ -596,9 +848,9 @@ class SelectRowsSuite:
                 'text': Field(repeated_field=Field(repeated_field=Field(dtype=DataType.STRING))),
             }))
 
-    signal = SelectRowsSuite.LengthSignal()
+    signal = LengthSignal()
 
-    result = db.select_rows(columns=[SignalUDF(signal, ('text', '*', '*'))])
+    result = db.select_rows([SignalUDF(signal, ('text', '*', '*'))])
     assert list(result) == [{
         UUID_COLUMN: '1',
         'length_signal(text_*)': [[5], [2, 3]]
@@ -625,10 +877,10 @@ class SelectRowsSuite:
             'text': Field(dtype=DataType.STRING),
         }))
 
-    db.compute_embedding_index(embedding=TEST_EMBEDDING_NAME, column='text')
+    db.compute_embedding_index(TEST_EMBEDDING_NAME, 'text')
 
     signal_col = SignalUDF(TestEmbeddingSumSignal(embedding=TEST_EMBEDDING_NAME), column='text')
-    result = db.select_rows(columns=['text', signal_col])
+    result = db.select_rows(['text', signal_col])
     expected_result = [{
         UUID_COLUMN: '1',
         'text': 'hello.',
@@ -643,7 +895,7 @@ class SelectRowsSuite:
     # Select rows with alias.
     signal_col = SignalUDF(
         TestEmbeddingSumSignal(embedding=TEST_EMBEDDING_NAME), Column('text'), alias='emb_sum')
-    result = db.select_rows(columns=['text', signal_col])
+    result = db.select_rows(['text', signal_col])
     expected_result = [{
         UUID_COLUMN: '1',
         'text': 'hello.',
@@ -673,11 +925,10 @@ class SelectRowsSuite:
                 'text': Field(repeated_field=Field(dtype=DataType.STRING)),
             }))
 
-    db.compute_embedding_index(embedding=TEST_EMBEDDING_NAME, column=('text', '*'))
+    db.compute_embedding_index(TEST_EMBEDDING_NAME, ('text', '*'))
 
-    signal_col = SignalUDF(
-        TestEmbeddingSumSignal(embedding=TEST_EMBEDDING_NAME), column=('text', '*'))
-    result = db.select_rows(columns=['text', signal_col])
+    signal_col = SignalUDF(TestEmbeddingSumSignal(embedding=TEST_EMBEDDING_NAME), ('text', '*'))
+    result = db.select_rows(['text', signal_col])
     expected_result = [{
         UUID_COLUMN: '1',
         'text': ['hello.', 'hello world.'],
@@ -708,10 +959,9 @@ class SelectRowsSuite:
         num_items=3)
 
     test_signal = TestSignal()
-    db.compute_signal_column(
-        signal=test_signal, column='str', signal_column_name='test_signal_on_str')
-
-    result = db.select_rows(columns=['str', 'test_signal_on_str'])
+    db.compute_signal_column(test_signal, 'str')
+    result = db.select_rows(
+        ['str', Column((LILAC_COLUMN, 'str', 'test_signal'), alias='test_signal_on_str')])
 
     assert list(result) == [{
         UUID_COLUMN: '1',
@@ -728,7 +978,7 @@ class SelectRowsSuite:
             'flen': 1.0
         }
     }, {
-        UUID_COLUMN: '2',
+        UUID_COLUMN: '3',
         'str': 'b',
         'test_signal_on_str': {
             'len': 1,
@@ -747,12 +997,19 @@ class SelectRowsSuite:
                 'int': Field(dtype=DataType.INT64),
                 'bool': Field(dtype=DataType.BOOLEAN),
                 'float': Field(dtype=DataType.FLOAT64),
-                'test_signal_on_str': Field(
+                LILAC_COLUMN: Field(
                     fields={
-                        'len': Field(dtype=DataType.INT32, derived_from=('str',)),
-                        'flen': Field(dtype=DataType.FLOAT32, derived_from=('str',))
-                    },
-                    derived_from=('str',))
+                        'str': Field(
+                            fields={
+                                'test_signal': Field(
+                                    fields={
+                                        'len': Field(dtype=DataType.INT32, derived_from=('str',)),
+                                        'flen': Field(
+                                            dtype=DataType.FLOAT32, derived_from=('str',))
+                                    },
+                                    derived_from=('str',))
+                            })
+                    })
             }),
         embedding_manifest=EmbeddingIndexerManifest(indexes=[]),
         entity_indexes=[],
@@ -774,41 +1031,23 @@ class SelectRowsSuite:
             'text': Field(dtype=DataType.STRING),
         }))
 
-    db.compute_signal_column(signal=TestSplitterWithLen(), column='text')
+    db.compute_signal_column(TestSplitterWithLen(), 'text')
 
-    result = db.select_rows(columns=['text', 'test_splitter_len(text)'])
+    result = db.select_rows(['text', (LILAC_COLUMN, 'text', 'test_splitter_len')])
     expected_result = [{
         UUID_COLUMN: '1',
         'text': '[1, 1] first sentence. [1, 1] second sentence.',
-        'test_splitter_len(text)': [{
-            'len': 22,
-            'split': {
-                TEXT_SPAN_START_FEATURE: 0,
-                TEXT_SPAN_END_FEATURE: 22
-            }
-        }, {
-            'len': 23,
-            'split': {
-                TEXT_SPAN_START_FEATURE: 23,
-                TEXT_SPAN_END_FEATURE: 46
-            }
-        }]
+        f'{LILAC_COLUMN}.text.test_splitter_len': [
+            TextEntity(0, 22, metadata={'len': 22}),
+            TextEntity(23, 46, metadata={'len': 23})
+        ]
     }, {
         UUID_COLUMN: '2',
         'text': 'b2 [2, 1] first sentence. [2, 1] second sentence.',
-        'test_splitter_len(text)': [{
-            'len': 25,
-            'split': {
-                TEXT_SPAN_START_FEATURE: 0,
-                TEXT_SPAN_END_FEATURE: 25
-            }
-        }, {
-            'len': 23,
-            'split': {
-                TEXT_SPAN_START_FEATURE: 26,
-                TEXT_SPAN_END_FEATURE: 49
-            }
-        }]
+        f'{LILAC_COLUMN}.text.test_splitter_len': [
+            TextEntity(0, 25, metadata={'len': 25}),
+            TextEntity(26, 49, metadata={'len': 23})
+        ]
     }]
     assert list(result) == expected_result
 
@@ -829,7 +1068,7 @@ class SelectRowsSuite:
         }))
 
     signal = TestEntitySignal()
-    db.compute_signal_column(signal=signal, column='text')
+    db.compute_signal_column(signal, 'text')
 
     assert db.manifest() == DatasetManifest(
         namespace=TEST_NAMESPACE,
@@ -838,35 +1077,41 @@ class SelectRowsSuite:
             fields={
                 UUID_COLUMN: Field(dtype=DataType.STRING),
                 'text': Field(dtype=DataType.STRING),
-                'test_entity_len(text)': Field(
-                    repeated_field=EntityField(
-                        entity_value=Field(dtype=DataType.STRING_SPAN, derived_from=(('text',))),
-                        fields={'len': Field(dtype=DataType.INT32, derived_from=('text',))}),
-                    derived_from=('text',))
+                LILAC_COLUMN: Field(
+                    fields={
+                        'text': Field(
+                            fields={
+                                'test_entity_len': Field(
+                                    repeated_field=TextEntityField(
+                                        metadata={
+                                            'len': Field(
+                                                dtype=DataType.INT32, derived_from=('text',))
+                                        },
+                                        derived_from=('text',)),
+                                    derived_from=('text',))
+                            })
+                    }),
             }),
         embedding_manifest=EmbeddingIndexerManifest(indexes=[]),
-        entity_indexes=[
-            EntityIndex(
-                source_path=('text',), index_path=('text', 'test_entity_len(text)'), signal=signal)
-        ],
+        entity_indexes=[EntityIndex(source_path=('text',), index_path=('text',), signal=signal)],
         num_items=2)
 
     # NOTE: The way this currently works is it just generates a new signal column, in the old
     # format. This will look different once entity indexes are merged.
-    result = db.select_rows(columns=['text', 'test_entity_len(text)'])
+    result = db.select_rows(['text', (LILAC_COLUMN, 'text', 'test_entity_len')])
     expected_result = [{
         UUID_COLUMN: '1',
         'text': '[1, 1] first sentence. [1, 1] second sentence.',
-        'test_entity_len(text)': [
-            Entity(entity=TextSpan(0, 22), metadata={'len': 22}),
-            Entity(entity=TextSpan(23, 46), metadata={'len': 23})
+        f'{LILAC_COLUMN}.text.test_entity_len': [
+            TextEntity(0, 22, metadata={'len': 22}),
+            TextEntity(23, 46, metadata={'len': 23})
         ]
     }, {
         UUID_COLUMN: '2',
         'text': 'b2 [2, 1] first sentence. [2, 1] second sentence.',
-        'test_entity_len(text)': [
-            Entity(entity=TextSpan(0, 25), metadata={'len': 25}),
-            Entity(entity=TextSpan(26, 49), metadata={'len': 23})
+        f'{LILAC_COLUMN}.text.test_entity_len': [
+            TextEntity(0, 25, metadata={'len': 25}),
+            TextEntity(26, 49, metadata={'len': 23})
         ]
     }]
     assert list(result) == expected_result
@@ -888,12 +1133,9 @@ class SelectRowsSuite:
         }))
 
     embedding = TestEmbedding()
-    db.compute_embedding_index(embedding=embedding, column='text')
+    db.compute_embedding_index(embedding, 'text')
 
-    db.compute_signal_column(
-        signal=TestEmbeddingSumSignal(embedding=TestEmbedding()),
-        column='text',
-        signal_column_name='text_emb_sum')
+    db.compute_signal_column(TestEmbeddingSumSignal(embedding=TestEmbedding()), 'text')
 
     assert db.manifest() == DatasetManifest(
         namespace=TEST_NAMESPACE,
@@ -902,22 +1144,33 @@ class SelectRowsSuite:
             fields={
                 UUID_COLUMN: Field(dtype=DataType.STRING),
                 'text': Field(dtype=DataType.STRING),
-                'text_emb_sum': Field(dtype=DataType.FLOAT32, derived_from=('text',))
+                LILAC_COLUMN: Field(
+                    fields={
+                        'text': Field(
+                            fields={
+                                'test_embedding_sum': Field(
+                                    dtype=DataType.FLOAT32, derived_from=('text',))
+                            })
+                    })
             }),
         embedding_manifest=EmbeddingIndexerManifest(
             indexes=[EmbeddingIndexInfo(column=('text',), embedding=embedding)]),
         entity_indexes=[],
         num_items=2)
 
-    result = db.select_rows(columns=['text', 'text_emb_sum'])
+    result = db.select_rows(['text', (LILAC_COLUMN, 'text')])
     expected_result = [{
         UUID_COLUMN: '1',
         'text': 'hello.',
-        'text_emb_sum': 1.0
+        f'{LILAC_COLUMN}.text': {
+            'test_embedding_sum': 1.0
+        }
     }, {
         UUID_COLUMN: '2',
         'text': 'hello2.',
-        'text_emb_sum': 2.0
+        f'{LILAC_COLUMN}.text': {
+            'test_embedding_sum': 2.0
+        }
     }]
     assert list(result) == expected_result
 
@@ -937,16 +1190,14 @@ class SelectRowsSuite:
             'text': Field(dtype=DataType.STRING),
         }))
 
-    db.compute_signal_column(
-        signal=TestSplitterWithLen(), column='text', signal_column_name='text_sentences')
-
+    entity_signal = TestEntitySignal()
+    db.compute_signal_column(entity_signal, 'text')
     embedding = TestEmbedding()
-    db.compute_embedding_index(embedding=embedding, column=('text_sentences', '*', 'split'))
-
+    db.compute_embedding_index(embedding,
+                               (LILAC_COLUMN, 'text', 'test_entity_len', '*', ENTITY_FEATURE_KEY))
     db.compute_signal_column(
-        signal=TestEmbeddingSumSignal(embedding=TestEmbedding()),
-        column=('text_sentences', '*', 'split'),
-        signal_column_name='text_sentences_emb_sum')
+        TestEmbeddingSumSignal(embedding=embedding),
+        (LILAC_COLUMN, 'text', 'test_entity_len', '*', ENTITY_FEATURE_KEY))
 
     assert db.manifest() == DatasetManifest(
         namespace=TEST_NAMESPACE,
@@ -955,61 +1206,55 @@ class SelectRowsSuite:
             fields={
                 UUID_COLUMN: Field(dtype=DataType.STRING),
                 'text': Field(dtype=DataType.STRING),
-                'text_sentences_emb_sum': Field(
-                    repeated_field=Field(
-                        fields={
-                            'split': Field(
-                                dtype=DataType.FLOAT32,
-                                derived_from=('text_sentences', PATH_WILDCARD, 'split'))
-                        })),
-                'text_sentences': Field(
-                    repeated_field=Field(
-                        fields={
-                            'len': Field(dtype=DataType.INT32, derived_from=('text',)),
-                            'split': Field(dtype=DataType.STRING_SPAN, derived_from=('text',))
-                        },
-                        derived_from=('text',)),
-                    derived_from=('text',))
+                LILAC_COLUMN: Field(
+                    fields={
+                        'text': Field(
+                            fields={
+                                'test_entity_len': Field(
+                                    repeated_field=TextEntityField(
+                                        metadata={
+                                            'len': Field(
+                                                dtype=DataType.INT32, derived_from=('text',))
+                                        },
+                                        extra_data={
+                                            'test_embedding_sum': Field(
+                                                dtype=DataType.FLOAT32,
+                                                derived_from=(LILAC_COLUMN, 'text',
+                                                              'test_entity_len', '*',
+                                                              ENTITY_FEATURE_KEY))
+                                        },
+                                        derived_from=('text',)),
+                                    derived_from=('text',))
+                            })
+                    })
             }),
         embedding_manifest=EmbeddingIndexerManifest(indexes=[
-            EmbeddingIndexInfo(column=('text_sentences', '*', 'split'), embedding=embedding)
+            EmbeddingIndexInfo(
+                column=(LILAC_COLUMN, 'text', 'test_entity_len', '*', ENTITY_FEATURE_KEY),
+                embedding=embedding)
         ]),
-        entity_indexes=[],
+        entity_indexes=[
+            EntityIndex(source_path=('text',), index_path=('text',), signal=entity_signal)
+        ],
         num_items=2)
 
-    result = db.select_rows(columns=['text', 'text_sentences', 'text_sentences_emb_sum'])
-    expected_result = [{
+    result = db.select_rows(
+        ['text', Column((LILAC_COLUMN, 'text', 'test_entity_len'), alias='sentences')])
+    assert list(result) == [{
         UUID_COLUMN: '1',
         'text': 'hello. hello2.',
-        'text_sentences': [{
-            'split': TextSpan(start=0, end=6),
-            'len': 6
-        }, {
-            'split': TextSpan(start=7, end=14),
-            'len': 7
-        }],
-        'text_sentences_emb_sum': [{
-            'split': 1.0
-        }, {
-            'split': 2.0
-        }]
+        'sentences': [
+            TextEntity(0, 6, metadata={'len': 6}, extra_data={'test_embedding_sum': 1.0}),
+            TextEntity(7, 14, metadata={'len': 7}, extra_data={'test_embedding_sum': 2.0})
+        ]
     }, {
         UUID_COLUMN: '2',
         'text': 'hello world. hello world2.',
-        'text_sentences': [{
-            'split': TextSpan(start=0, end=12),
-            'len': 12
-        }, {
-            'split': TextSpan(start=13, end=26),
-            'len': 13
-        }],
-        'text_sentences_emb_sum': [{
-            'split': 3.0
-        }, {
-            'split': 4.0
-        }]
+        'sentences': [
+            TextEntity(0, 12, metadata={'len': 12}, extra_data={'test_embedding_sum': 3.0}),
+            TextEntity(13, 26, metadata={'len': 13}, extra_data={'test_embedding_sum': 4.0})
+        ]
     }]
-    assert list(result) == expected_result
 
   def test_invalid_column_paths(self, tmp_path: pathlib.Path, db_cls: Type[DatasetDB]) -> None:
     db = make_db(
@@ -1031,14 +1276,14 @@ class SelectRowsSuite:
                 'text2': Field(repeated_field=Field(dtype=DataType.STRING)),
             }))
     test_signal = TestSignal()
-    db.compute_signal_column(signal=test_signal, column='text')
-    db.compute_signal_column(signal=test_signal, column=('text2', '*'))
+    db.compute_signal_column(test_signal, 'text')
+    db.compute_signal_column(test_signal, ('text2', '*'))
 
     with pytest.raises(ValueError, match='Path part "invalid" not found in the dataset'):
-      db.select_rows(columns=[('test_signal(text)', 'invalid')])
+      db.select_rows([(LILAC_COLUMN, 'text', 'test_signal', 'invalid')])
 
     with pytest.raises(ValueError, match='Selecting a specific index of a repeated field'):
-      db.select_rows(columns=[('test_signal(text2)', 4)])
+      db.select_rows([(LILAC_COLUMN, 'text2', 4, 'test_signal')])
 
   def test_sort(self, tmp_path: pathlib.Path, db_cls: Type[DatasetDB]) -> None:
     db = make_db(db_cls, tmp_path, SIMPLE_ITEMS, SIMPLE_SCHEMA)
@@ -1047,7 +1292,7 @@ class SelectRowsSuite:
         columns=[UUID_COLUMN, 'float'], sort_by=['float'], sort_order=SortOrder.ASC)
 
     assert list(result) == [{
-        UUID_COLUMN: '2',
+        UUID_COLUMN: '3',
         'float': 1.0
     }, {
         UUID_COLUMN: '2',
@@ -1067,7 +1312,7 @@ class SelectRowsSuite:
         UUID_COLUMN: '2',
         'float': 2.0
     }, {
-        UUID_COLUMN: '2',
+        UUID_COLUMN: '3',
         'float': 1.0
     }]
 
@@ -1076,7 +1321,7 @@ class SelectRowsSuite:
 
     result = db.select_rows(
         columns=[UUID_COLUMN, 'float'], sort_by=['float'], sort_order=SortOrder.ASC, limit=2)
-    assert list(result) == [{UUID_COLUMN: '2', 'float': 1.0}, {UUID_COLUMN: '2', 'float': 2.0}]
+    assert list(result) == [{UUID_COLUMN: '3', 'float': 1.0}, {UUID_COLUMN: '2', 'float': 2.0}]
 
 
 class TestSignal(Signal):
@@ -1100,11 +1345,7 @@ class TestSplitterWithLen(Signal):
 
   @override
   def fields(self) -> Field:
-    return Field(
-        repeated_field=Field(fields={
-            'len': Field(dtype=DataType.INT32),
-            'split': Field(dtype=DataType.STRING_SPAN)
-        }))
+    return Field(repeated_field=TextEntityField(metadata={'len': Field(dtype=DataType.INT32)}))
 
   @override
   def compute(self, data: Iterable[RichData]) -> Iterable[ItemValue]:
@@ -1112,10 +1353,12 @@ class TestSplitterWithLen(Signal):
       if not isinstance(text, str):
         raise ValueError(f'Expected text to be a string, got {type(text)} instead.')
       sentences = [f'{sentence.strip()}.' for sentence in text.split('.') if sentence]
-      yield [{
-          'len': len(sentence),
-          'split': TextSpan(start=text.index(sentence), end=text.index(sentence) + len(sentence))
-      } for sentence in sentences]
+      yield [
+          TextEntity(
+              start=text.index(sentence),
+              end=text.index(sentence) + len(sentence),
+              metadata={'len': len(sentence)}) for sentence in sentences
+      ]
 
 
 class TestEntitySignal(Signal):
@@ -1128,9 +1371,7 @@ class TestEntitySignal(Signal):
 
   @override
   def fields(self) -> Field:
-    return Field(
-        repeated_field=EntityField(
-            Field(dtype=DataType.STRING_SPAN), {'len': Field(dtype=DataType.INT32)}))
+    return Field(repeated_field=TextEntityField(metadata={'len': Field(dtype=DataType.INT32)}))
 
   @override
   def compute(self, data: Iterable[RichData]) -> Iterable[ItemValue]:
@@ -1139,8 +1380,9 @@ class TestEntitySignal(Signal):
         raise ValueError(f'Expected text to be a string, got {type(text)} instead.')
       sentences = [f'{sentence.strip()}.' for sentence in text.split('.') if sentence]
       yield [
-          Entity(
-              entity=TextSpan(start=text.index(sentence), end=text.index(sentence) + len(sentence)),
+          TextEntity(
+              start=text.index(sentence),
+              end=text.index(sentence) + len(sentence),
               metadata={'len': len(sentence)}) for sentence in sentences
       ]
 
@@ -1156,7 +1398,8 @@ class TestEmbeddingSumSignal(Signal):
     return Field(dtype=DataType.FLOAT32)
 
   @override
-  def vector_compute(self, keys: Iterable[str], vector_store: VectorStore) -> Iterable[ItemValue]:
+  def vector_compute(self, keys: Iterable[PathTuple],
+                     vector_store: VectorStore) -> Iterable[ItemValue]:
     if not self.embedding:
       raise ValueError('self.embedding is None.')
 
@@ -1202,10 +1445,8 @@ class ComputeSignalItemsSuite:
         }))
 
     with pytest.raises(
-        ValueError,
-        match='The enriched outputs \\(0\\) and the input data \\(2\\) do not have the same length'
-    ):
-      db.compute_signal_column(signal=signal, column=('text',))
+        ValueError, match='The signal generated 0 values but the input data had 2 values.'):
+      db.compute_signal_column(signal, 'text')
 
 
 @pytest.mark.parametrize('db_cls', ALL_DBS)

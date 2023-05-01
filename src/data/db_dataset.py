@@ -2,7 +2,7 @@
 import abc
 import datetime
 import enum
-from typing import Any, Iterable, Iterator, Optional, Sequence, Union
+from typing import Any, Iterator, Optional, Sequence, Union
 
 import pandas as pd
 from pydantic import (
@@ -17,7 +17,7 @@ from pydantic import (
 
 from ..embeddings.embedding_index import EmbeddingIndexerManifest
 from ..embeddings.embedding_registry import EmbeddingId
-from ..schema import Item, Path, PathTuple, Schema, path_to_alias
+from ..schema import Path, PathTuple, Schema, path_to_alias
 from ..signals.concept_scorer import ConceptScoreSignal
 from ..signals.signal import Signal
 from ..signals.signal_registry import resolve_signal
@@ -30,12 +30,16 @@ TOO_MANY_DISTINCT = 10_000
 class SelectRowsResult():
   """The result of a select rows query."""
 
-  def __init__(self, rows: Iterable[Item]) -> None:
+  def __init__(self, df: pd.DataFrame) -> None:
     """Initialize the result."""
-    self.rows = rows
+    self._df = df
 
   def __iter__(self) -> Iterator:
-    return iter(self.rows)
+    return (row.to_dict() for _, row in self._df.iterrows())
+
+  def df(self) -> pd.DataFrame:
+    """Convert the result to a pandas DataFrame."""
+    return self._df
 
 
 class SelectGroupsResult():
@@ -137,7 +141,7 @@ class Column(BaseModel):
 
     if not alias:
       if transform and isinstance(transform, SignalTransform):
-        alias = default_top_level_signal_col_name(transform.signal, Column(feature))
+        alias = make_parquet_id(transform.signal, Column(feature))
       else:
         alias = path_to_alias(feature)
 
@@ -274,20 +278,14 @@ class DatasetDB(abc.ABC):
   def compute_signal_column(self,
                             signal: Signal,
                             column: ColumnId,
-                            signal_column_name: Optional[str] = None,
-                            task_id: Optional[TaskId] = None) -> str:
+                            task_id: Optional[TaskId] = None) -> None:
     """Compute a signal for a column.
 
     Args:
       signal: The signal to compute over the given columns.
       column: The column to compute the signal on.
-      signal_column_name: The name of the result signal columns. This acts as a namespace for
-        the set of columns the signal produces.
       task_id: The TaskManager `task_id` for this process run. This is used to update the progress
         of the task.
-
-    Returns
-      The name of the result columns.
     """
     pass
 
@@ -370,8 +368,8 @@ class DatasetDB(abc.ABC):
     pass
 
 
-def default_top_level_signal_col_name(signal: Signal, column: Column) -> str:
-  """Return the default name for a result column."""
+def make_parquet_id(signal: Signal, column: Column) -> str:
+  """Return a unique identifier for this parquet table."""
   if isinstance(column.feature, Column):
     raise ValueError('Transforms are not yet supported.')
 
