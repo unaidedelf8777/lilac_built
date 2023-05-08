@@ -23,6 +23,8 @@ from ..schema import (
   ItemValue,
   PathTuple,
   Schema,
+  field,
+  schema,
   schema_to_arrow_schema,
 )
 from ..signals.signal import Signal
@@ -153,8 +155,8 @@ def _merge_field_into(schema: Field, destination: Field) -> None:
 def merge_schemas(schemas: list[Schema]) -> Schema:
   """Merge a list of schemas."""
   merged_schema = Schema(fields={})
-  for schema in schemas:
-    _merge_field_into(cast(Field, schema), cast(Field, merged_schema))
+  for s in schemas:
+    _merge_field_into(cast(Field, s), cast(Field, merged_schema))
   return merged_schema
 
 
@@ -178,9 +180,9 @@ def path_is_from_lilac(path: PathTuple) -> bool:
   return path[0] == LILAC_COLUMN
 
 
-def create_signal_schema(signal: Signal, source_path: PathTuple, schema: Schema) -> Schema:
+def create_signal_schema(signal: Signal, source_path: PathTuple, current_schema: Schema) -> Schema:
   """Create a schema describing the enriched fields added an enrichment."""
-  leafs = schema.leafs
+  leafs = current_schema.leafs
   # Validate that the enrich fields are actually a valid leaf path.
   if source_path not in leafs:
     raise ValueError(f'"{source_path}" is not a valid leaf path. '
@@ -191,12 +193,12 @@ def create_signal_schema(signal: Signal, source_path: PathTuple, schema: Schema)
 
   # Apply the "derived_from" field lineage to the field we are enriching.
   _apply_field_lineage(signal_schema, source_path)
-  enriched_schema = Field(fields={signal.key(): signal_schema})
+  enriched_schema = field({signal.key(): signal_schema})
 
   # If we are enriching an entity we should store the signal data in the entity field's parent.
   if source_path[-1] == ENTITY_FEATURE_KEY:
     source_path = source_path[:-1]
-    enriched_schema.derived_from = schema.get_field(source_path).derived_from
+    enriched_schema.derived_from = current_schema.get_field(source_path).derived_from
 
   for path_part in reversed(source_path):
     if path_part == PATH_WILDCARD:
@@ -211,7 +213,7 @@ def create_signal_schema(signal: Signal, source_path: PathTuple, schema: Schema)
   if path_is_from_lilac(source_path):
     enriched_schema = enriched_schema.fields[LILAC_COLUMN]
 
-  return Schema(fields={UUID_COLUMN: Field(dtype=DataType.STRING), LILAC_COLUMN: enriched_schema})
+  return schema({UUID_COLUMN: 'string', LILAC_COLUMN: enriched_schema})
 
 
 def _apply_field_lineage(field: Field, derived_from: PathTuple) -> None:
