@@ -1,15 +1,15 @@
 import {
   DataLoadersService,
   DatasetsService,
+  UUID_COLUMN,
   deserializeRow,
   deserializeSchema,
-  UUID_COLUMN,
   type DataType,
   type Filter,
   type LilacSchema,
   type SelectRowsOptions
 } from '$lilac';
-import { createInfiniteQuery } from '@tanstack/svelte-query';
+import { createInfiniteQuery, useQueryClient } from '@tanstack/svelte-query';
 import { createApiMutation, createApiQuery } from './apiUtils';
 
 export const SELECT_GROUPS_SUPPORTED_DTYPES: DataType[] = [
@@ -42,10 +42,15 @@ export const useGetSourceSchemaQuery = createApiQuery(
   DataLoadersService.getSourceSchema,
   DATASETS_TAG
 );
-export const useLoadDatasetMutation = createApiMutation(DataLoadersService.load, DATASETS_TAG);
+export const useLoadDatasetMutation = createApiMutation(DataLoadersService.load);
 export const useComputeSignalColumnMutation = createApiMutation(
   DatasetsService.computeSignalColumn,
-  DATASETS_TAG
+  {
+    onSuccess: () => {
+      const queryClient = useQueryClient();
+      queryClient.invalidateQueries([]);
+    }
+  }
 );
 export const useGetStatsQuery = createApiQuery(DatasetsService.getStats, DATASETS_TAG);
 export const useSelectRowsQuery = createApiQuery(function selectRows(
@@ -65,7 +70,7 @@ export const useSelectRowsInfiniteQuery = (
   namespace: string,
   datasetName: string,
   selectRowOptions: SelectRowsOptions,
-  schema: LilacSchema
+  schema: LilacSchema | undefined
 ) =>
   createInfiniteQuery({
     queryKey: [DATASETS_TAG, 'selectRows', namespace, datasetName, selectRowOptions],
@@ -73,8 +78,10 @@ export const useSelectRowsInfiniteQuery = (
       DatasetsService.selectRows(namespace, datasetName, {
         ...selectRowOptions,
         offset: pageParam * (selectRowOptions.limit || 40)
-      }).then((res) => res.map((row) => deserializeRow(row, schema))),
-    getNextPageParam: (lastPage, pages) => pages.length
+        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      }).then((res) => res.map((row) => deserializeRow(row, schema!))),
+    getNextPageParam: (lastPage, pages) => pages.length,
+    enabled: !!schema
   });
 
 export const useSelectRowByUUIDQuery = (

@@ -1,17 +1,19 @@
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
 import { afterEach, assertType, describe, expect, it } from 'vitest';
-import { Schema } from './fastapi_client';
+import type { Schema } from './fastapi_client';
 import {
+  L,
   clearCache,
   deserializeRow,
   deserializeSchema,
   getField,
   getValueNode,
-  L,
+  getValueNodes,
+  isSignalField,
   listFields,
   listValueNodes
 } from './lilac';
-import { ENTITY_FEATURE_KEY } from './schema';
+import { ENTITY_FEATURE_KEY, type FieldValue } from './schema';
 
 const MANIFEST_SCHEMA_FIXTURE: Schema = {
   fields: {
@@ -74,16 +76,13 @@ const MANIFEST_SCHEMA_FIXTURE: Schema = {
                   repeated_field: {
                     fields: {},
                     dtype: 'string_span',
-                    is_entity: true,
-                    derived_from: ['comment_text']
+                    is_entity: true
                   },
-                  dtype: 'list',
-                  derived_from: ['comment_text']
+                  dtype: 'list'
                 }
               },
               dtype: 'struct',
-              signal_root: true,
-              derived_from: ['comment_text']
+              signal_root: true
             }
           },
           dtype: 'struct'
@@ -97,13 +96,11 @@ const MANIFEST_SCHEMA_FIXTURE: Schema = {
                 text_statistics: {
                   fields: {
                     num_characters: {
-                      dtype: 'int32',
-                      derived_from: ['review']
+                      dtype: 'int32'
                     }
                   },
                   dtype: 'struct',
-                  signal_root: true,
-                  derived_from: ['review']
+                  signal_root: true
                 }
               }
             }
@@ -115,7 +112,7 @@ const MANIFEST_SCHEMA_FIXTURE: Schema = {
   }
 };
 
-const SELECT_ROWS_RESPONSE_FIXTURE = {
+const SELECT_ROWS_RESPONSE_FIXTURE: FieldValue = {
   title: 'title text',
   comment_text: 'text content',
   tags: ['tag1', 'tag2'],
@@ -247,6 +244,11 @@ describe('lilac', () => {
       const fields3 = listFields(schema);
       expect(fields).not.toBe(fields3);
     });
+    it('should not return root field', () => {
+      const fields = listFields(schema);
+      expect(fields).not.toContainEqual([]);
+      expect(fields).not.toContainEqual(null);
+    });
   });
 
   describe('listValues', () => {
@@ -287,7 +289,7 @@ describe('lilac', () => {
     });
   });
 
-  describe('getValue', () => {
+  describe('getValueNode', () => {
     it('should return simple paths', () => {
       const value = getValueNode(row, ['title']);
       expect(L.path(value!)).toEqual(['title']);
@@ -303,6 +305,20 @@ describe('lilac', () => {
     it('should return a value by path with repeated fields', () => {
       const value = getValueNode(row, ['complex_list_of_struct', '*']);
       expect(L.path(value!)).toEqual(['complex_list_of_struct', '*']);
+    });
+  });
+
+  describe('getValueNodes', () => {
+    it('should get all values in repeated fields', () => {
+      const values = getValueNodes(row, ['__lilac__', 'comment_text', 'pii', 'emails', '*']);
+      expect(L.value(values[0])).toEqual({
+        end: 19,
+        start: 1
+      });
+      expect(L.value(values[1])).toEqual({
+        end: 100,
+        start: 82
+      });
     });
   });
 
@@ -341,6 +357,13 @@ describe('lilac', () => {
         // Woops, this should never happen
         expect(0).toEqual(1);
       }
+    });
+  });
+
+  describe('utilities', () => {
+    it('isSignalField', () => {
+      expect(isSignalField(schema.fields!.comment_text!)).toEqual(false);
+      expect(isSignalField(schema.fields!.comment_text.fields!.pii)).toEqual(true);
     });
   });
 
