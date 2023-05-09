@@ -34,11 +34,19 @@ export const SELECT_GROUPS_SUPPORTED_DTYPES: DataType[] = [
 const DATASETS_TAG = 'datasets';
 
 export const useGetDatasetsQuery = createApiQuery(DatasetsService.getDatasets, DATASETS_TAG);
-export const useGetManifestQuery = createApiQuery(DatasetsService.getManifest, DATASETS_TAG, {});
+export const useGetManifestQuery = createApiQuery(
+  DatasetsService.getManifest,
+  [DATASETS_TAG, 'getManifest'],
+  {}
+);
 
-export const useGetSchemaQuery = createApiQuery(DatasetsService.getManifest, DATASETS_TAG, {
-  select: (res) => deserializeSchema(res.dataset_manifest.data_schema)
-});
+export const useGetSchemaQuery = createApiQuery(
+  DatasetsService.getManifest,
+  [DATASETS_TAG, 'getManifest'],
+  {
+    select: (res) => deserializeSchema(res.dataset_manifest.data_schema)
+  }
+);
 
 export const useGetSourcesQuery = createApiQuery(DataLoadersService.getSources, DATASETS_TAG);
 export const useGetSourceSchemaQuery = createApiQuery(
@@ -54,11 +62,7 @@ export const useComputeSignalColumnMutation = createApiMutation(
 
       watchTask(resp.task_id, () => {
         queryClient.invalidateQueries([DATASETS_TAG, 'getManifest']);
-        // If the invalidation isn't delayed, server throws an error
-        // https://github.com/lilacai/lilac/issues/136
-        setTimeout(() => {
-          queryClient.invalidateQueries([DATASETS_TAG, 'selectRows']);
-        }, 500);
+        queryClient.invalidateQueries([DATASETS_TAG, 'selectRows']);
       });
     }
   }
@@ -89,9 +93,13 @@ export const useSelectRowsInfiniteQuery = (
       DatasetsService.selectRows(namespace, datasetName, {
         ...selectRowOptions,
         offset: pageParam * (selectRowOptions.limit || 40)
-        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-      }).then((res) => res.map((row) => deserializeRow(row, schema!))),
-    getNextPageParam: (lastPage, pages) => pages.length,
+      }),
+    select: (data) => ({
+      ...data,
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      pages: data.pages.map((page) => page.map((row) => deserializeRow(row, schema!)))
+    }),
+    getNextPageParam: (_, pages) => pages.length,
     enabled: !!schema
   });
 
