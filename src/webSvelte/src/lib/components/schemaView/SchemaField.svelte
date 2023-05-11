@@ -10,7 +10,10 @@
   } from '$lilac';
   import {Checkbox, Tag} from 'carbon-components-svelte';
   import CaretDown from 'carbon-icons-svelte/lib/CaretDown.svelte';
+  import SortAscending from 'carbon-icons-svelte/lib/SortAscending.svelte';
+  import SortDescending from 'carbon-icons-svelte/lib/SortDescending.svelte';
   import {slide} from 'svelte/transition';
+  import RemovableTag from '../common/RemovableTag.svelte';
   import ContextMenu from '../contextMenu/ContextMenu.svelte';
   import SchemaFieldMenu from '../contextMenu/SchemaFieldMenu.svelte';
 
@@ -29,7 +32,10 @@
 
   $: children = childFields(field);
   $: hasChildren = children.length > 0;
+
   $: isVisible = $datasetViewStore.visibleColumns.some(p => pathIsEqual(p, path));
+  $: isSortedBy = $datasetViewStore.sortBy.some(p => pathIsEqual(p, path));
+  $: sortOrder = $datasetViewStore.sortOrder;
 
   // Find all the child paths for a given field.
   function childFields(field?: LilacSchemaField): LilacSchemaField[] {
@@ -47,7 +53,9 @@
   <!-- Skip over fields that contain repeated fields -->
   <svelte:self field={field.repeated_field} {indent} {schema} />
 {:else}
-  <div class="flex w-full flex-row items-center border-b border-gray-200 py-2 hover:bg-gray-100">
+  <div
+    class="flex w-full flex-row items-center border-b border-gray-200 px-4 py-2 hover:bg-gray-100"
+  >
     <div class="w-6">
       <Checkbox
         labelText="Show"
@@ -75,11 +83,28 @@
     <div class="grow truncate whitespace-nowrap text-gray-900" class:text-blue-600={signalField}>
       {fieldName}
     </div>
-    {#if signalField}
-      <div>
-        <Tag type="blue">Signal</Tag>
-      </div>
+    {#if isSortedBy}
+      <RemovableTag
+        interactive
+        type="green"
+        on:click={() =>
+          sortOrder === 'ASC'
+            ? ($datasetViewStore.sortOrder = 'DESC')
+            : ($datasetViewStore.sortOrder = 'ASC')}
+        on:remove={() => datasetViewStore.removeSortBy(path)}
+      >
+        Sorted
+        {#if sortOrder == 'ASC'}
+          <SortAscending />
+        {:else}
+          <SortDescending />
+        {/if}
+      </RemovableTag>
     {/if}
+    {#if signalField}
+      <Tag type="blue">Signal</Tag>
+    {/if}
+
     <div class="w-24 pr-2 text-right">{field?.dtype || ''}{isRepeatedField ? '[]' : ''}</div>
     <div>
       <ContextMenu>
