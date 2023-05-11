@@ -2,6 +2,7 @@
 from ..embeddings.cohere import Cohere
 from .concept_scorer import ConceptScoreSignal
 from .pii import PIISignal
+from .semantic_search import SemanticSearchSignal
 from .signal_registry import register_signal
 from .splitters.text_splitter_spacy import SentenceSplitterSpacy
 from .text_statistics import TextStatisticsSignal
@@ -19,3 +20,6 @@ def register_default_signals() -> None:
 
   # Embeddings.
   register_signal(Cohere)
+
+  # Text embedding inputs.
+  register_signal(SemanticSearchSignal)
