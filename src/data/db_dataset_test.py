@@ -142,6 +142,103 @@ class SelectRowsSuite:
     result = db.select_rows()
     assert list(result) == lilac_items(SIMPLE_ITEMS)
 
+  def test_select_subcols_with_dot_seperator(self, tmp_path: pathlib.Path,
+                                             db_cls: Type[DatasetDB]) -> None:
+    items: list[Item] = [{
+      UUID_COLUMN: '1',
+      'people': [{
+        'name': 'A',
+        'address': {
+          'zip': 1
+        }
+      }, {
+        'name': 'B',
+        'address': {
+          'zip': 2
+        }
+      }]
+    }, {
+      UUID_COLUMN: '2',
+      'people': [{
+        'name': 'C',
+        'address': {
+          'zip': 3
+        }
+      }]
+    }]
+    db = make_db(db_cls, tmp_path, items)
+
+    result = db.select_rows(['people.*.name', 'people.*.address.zip'])
+    assert list(result) == lilac_items([{
+      UUID_COLUMN: '1',
+      'people.*.name': ['A', 'B'],
+      'people.*.address.zip': [1, 2]
+    }, {
+      UUID_COLUMN: '2',
+      'people.*.name': ['C'],
+      'people.*.address.zip': [3]
+    }])
+
+    result = db.select_rows(['people.*.address.zip'], combine_columns=True)
+    assert list(result) == lilac_items([{
+      UUID_COLUMN: '1',
+      'people': [{
+        'address': {
+          'zip': 1
+        }
+      }, {
+        'address': {
+          'zip': 2
+        }
+      }]
+    }, {
+      UUID_COLUMN: '2',
+      'people': [{
+        'address': {
+          'zip': 3
+        }
+      }]
+    }])
+
+    result = db.select_rows(['people'])
+    assert list(result) == lilac_items(items)
+
+  def test_select_subcols_with_escaped_dot(self, tmp_path: pathlib.Path,
+                                           db_cls: Type[DatasetDB]) -> None:
+    items: list[Item] = [{
+      UUID_COLUMN: '1',
+      'people.new': [{
+        'name': 'A'
+      }, {
+        'name': 'B'
+      }]
+    }, {
+      UUID_COLUMN: '2',
+      'people.new': [{
+        'name': 'C'
+      }]
+    }]
+    db = make_db(db_cls, tmp_path, items)
+
+    result = db.select_rows(['"people.new".*.name'])
+    assert list(result) == lilac_items([{
+      UUID_COLUMN: '1',
+      'people.new.*.name': ['A', 'B'],
+    }, {
+      UUID_COLUMN: '2',
+      'people.new.*.name': ['C'],
+    }])
+
+    # Escape name even though it does not need to be.
+    result = db.select_rows(['"people.new".*."name"'])
+    assert list(result) == lilac_items([{
+      UUID_COLUMN: '1',
+      'people.new.*.name': ['A', 'B'],
+    }, {
+      UUID_COLUMN: '2',
+      'people.new.*.name': ['C'],
+    }])
+
   def test_select_star(self, tmp_path: pathlib.Path, db_cls: Type[DatasetDB]) -> None:
     items: list[Item] = [{
       UUID_COLUMN: '1',
@@ -160,6 +257,10 @@ class SelectRowsSuite:
 
     # Select *.
     result = db.select_rows(['*'])
+    assert list(result) == lilac_items(items)
+
+    # Select (*,).
+    result = db.select_rows([('*',)])
     assert list(result) == lilac_items(items)
 
     # Select *, plus a redundant `info` column.
