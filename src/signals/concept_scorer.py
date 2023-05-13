@@ -7,19 +7,16 @@ from typing_extensions import override
 from ..concepts.concept import ConceptModel
 from ..concepts.db_concept import DISK_CONCEPT_MODEL_DB, ConceptModelDB
 from ..embeddings.vector_store import VectorStore
-from ..schema import DataType, EnrichmentType, Field, ItemValue, PathTuple, RichData
-from .signal import Signal
-from .signal_registry import get_signal_cls
+from ..schema import DataType, Field, ItemValue, PathTuple, RichData
+from .signal import TextEmbeddingModelSignal
 
 
-class ConceptScoreSignal(Signal):
+class ConceptScoreSignal(TextEmbeddingModelSignal):
   """Compute scores along a "concept" for documents."""
   name = 'concept_score'
-  enrichment_type = EnrichmentType.TEXT_EMBEDDING
 
   namespace: str
   concept_name: str
-  embedding_name: str
 
   _concept_model_db: ConceptModelDB
 
@@ -28,24 +25,15 @@ class ConceptScoreSignal(Signal):
 
     self._concept_model_db = DISK_CONCEPT_MODEL_DB
 
-    # Make sure that the embedding signal exists.
-    try:
-      get_signal_cls(self.embedding_name)
-    except Exception as e:
-      raise ValueError(
-        f'Embedding signal "{self.embedding_name}" not found in the registry.') from e
-
   @override
   def fields(self) -> Field:
     return Field(dtype=DataType.FLOAT32)
 
   def _get_concept_model(self) -> ConceptModel:
-    concept_model = self._concept_model_db.get(self.namespace, self.concept_name,
-                                               self.embedding_name)
+    concept_model = self._concept_model_db.get(self.namespace, self.concept_name, self.embedding)
     if not self._concept_model_db.in_sync(concept_model):
-      raise ValueError(
-        f'Concept model "{self.namespace}/{self.concept_name}/{self.embedding_name}" '
-        'is out of sync with its concept')
+      raise ValueError(f'Concept model "{self.namespace}/{self.concept_name}/{self.embedding}" '
+                       'is out of sync with its concept')
     return concept_model
 
   @override

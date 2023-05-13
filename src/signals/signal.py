@@ -1,19 +1,20 @@
 """Interface for implementing a signal."""
 
 import abc
-from typing import ClassVar, Iterable, Optional
+from typing import Any, ClassVar, Iterable, Optional, Type, Union
 
 from pydantic import BaseModel, validator
+from typing_extensions import override
 
 from ..embeddings.vector_store import VectorStore
-from ..schema import EnrichmentType, Field, PathTuple, RichData, SignalOut
+from ..schema import DataType, Field, PathTuple, RichData, SignalInputType, SignalOut
 
 
 class Signal(abc.ABC, BaseModel):
   """Interface for signals to implement. A signal can score documents and a dataset column."""
   # ClassVars do not get serialized with pydantic.
   name: ClassVar[str]
-  enrichment_type: ClassVar[EnrichmentType]
+  input_type: ClassVar[SignalInputType]
 
   # The signal_name will get populated in init automatically from the class name so it gets
   # serialized and the signal author doesn't have to define both the static property and the field.
@@ -109,3 +110,88 @@ class Signal(abc.ABC, BaseModel):
     args = ','.join(args_list)
     display_args = '' if not args_list else f'({args})'
     return self.name + display_args
+
+
+# Signal base classes, used for inferring the dependency chain required for computing a signal.
+class TextSignal(Signal):
+  """An interface for signals that compute over text."""
+  input_type = SignalInputType.TEXT
+  # TODO(nsthorat): split should be a union of literals.
+  split: Optional[str]
+
+
+class TextSplitterSignal(Signal):
+  """An interface for signals that compute over text."""
+  input_type = SignalInputType.TEXT
+
+  @override
+  def fields(self) -> Field:
+    return Field(repeated_field=Field(dtype=DataType.STRING_SPAN))
+
+
+class TextEmbeddingSignal(TextSignal):
+  """An interface for signals that compute embeddings for text."""
+  input_type = SignalInputType.TEXT
+
+  def fields(self) -> Field:
+    """Return the fields for the embedding."""
+    return Field(dtype=DataType.EMBEDDING)
+
+
+class TextEmbeddingModelSignal(TextSignal):
+  """An interface for signals that take embeddings and produce items."""
+  input_type = SignalInputType.TEXT_EMBEDDING
+  # TODO(nsthorat): Allow this to be an embedding signal if we want to allow python users to pass
+  # an embedding signal without registering it.
+  embedding: str
+
+  def __init__(self, **data: Any):
+    super().__init__(**data)
+
+    # Make sure that the embedding signal exists and is a TextEmbeddingSignal.
+    try:
+      embedding_signal_cls = get_signal_cls(self.embedding)
+    except Exception as e:
+      raise ValueError(f'Embedding signal "{self.embedding}" not found in the registry.') from e
+
+    if not issubclass(embedding_signal_cls, TextEmbeddingSignal):
+      raise ValueError(f'Only text embedding signals are currently supported for concepts. '
+                       f'"{self.embedding}" is a {embedding_signal_cls.__name__}.')
+
+
+SIGNAL_REGISTRY: dict[str, Type[Signal]] = {}
+
+
+def register_signal(signal_cls: Type[Signal]) -> None:
+  """Register a signal in the global registry."""
+  if signal_cls.name in SIGNAL_REGISTRY:
+    raise ValueError(f'Signal "{signal_cls.name}" has already been registered!')
+
+  SIGNAL_REGISTRY[signal_cls.name] = signal_cls
+
+
+def get_signal_cls(signal_name: str) -> Type[Signal]:
+  """Return a registered signal given the name in the registry."""
+  if signal_name not in SIGNAL_REGISTRY:
+    raise ValueError(f'Signal "{signal_name}" not found in the registry')
+
+  return SIGNAL_REGISTRY[signal_name]
+
+
+def resolve_signal(signal: Union[dict, Signal]) -> Signal:
+  """Resolve a generic signal base class to a specific signal class."""
+  if isinstance(signal, Signal):
+    # The signal config is already parsed.
+    return signal
+
+  signal_name = signal.get('signal_name')
+  if not signal_name:
+    raise ValueError('"signal_name" needs to be defined in the json dict.')
+
+  signal_cls = get_signal_cls(signal_name)
+  return signal_cls(**signal)
+
+
+def clear_signal_registry() -> None:
+  """Clear the signal registry."""
+  SIGNAL_REGISTRY.clear()

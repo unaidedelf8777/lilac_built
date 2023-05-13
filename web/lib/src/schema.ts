@@ -2,8 +2,8 @@ import type {
   BucketizeTransform,
   ConceptScoreSignal,
   DataType,
-  EnrichmentType,
   Signal,
+  SignalInputType,
   SignalTransform
 } from '../fastapi_client';
 export type LeafValue = number | boolean | string | null;
@@ -23,7 +23,7 @@ export const PATH_WILDCARD = '*';
 export const UUID_COLUMN = '__rowid__';
 export const VALUE_FEATURE_KEY = '__value__';
 
-export const ENRICHMENT_TYPE_TO_VALID_DTYPES: Record<EnrichmentType, DataType[]> = {
+export const SIGNAL_INPUT_TYPE_TO_VALID_DTYPES: Record<SignalInputType, DataType[]> = {
   text: ['string', 'string_span'],
   text_embedding: ['embedding'],
   image: ['binary']
