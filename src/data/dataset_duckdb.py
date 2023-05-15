@@ -391,13 +391,16 @@ class DatasetDuckDB(Dataset):
       raise ValueError('leaf_path must be provided')
     path = normalize_path(leaf_path)
     manifest = self.manifest()
+    leafs = manifest.data_schema.leafs
     leaf = manifest.data_schema.leafs.get(path)
     if not leaf or not leaf.dtype:
       raise ValueError(f'Leaf "{path}" not found in dataset')
 
     value_path = _make_value_path(path)
-    inner_select, _ = self._create_select_column(
-      Column(value_path, alias='val'), manifest, flatten=True, unnest=True, resolve_span=True)
+    duckdb_path = self._leaf_path_to_duckdb_path(value_path)
+    inner_select = _select_sql(
+      duckdb_path, flatten=True, unnest=True, span_from=self._get_span_from(path))
+
     # Compute approximate count by sampling the data to avoid OOM.
     sample_size = SAMPLE_SIZE_DISTINCT_COUNT
     avg_length_query = ''
@@ -406,12 +409,12 @@ class DatasetDuckDB(Dataset):
 
     approx_count_query = f"""
       SELECT approx_count_distinct(val) as approxCountDistinct {avg_length_query}
-      FROM (SELECT {inner_select} FROM t LIMIT {sample_size});
+      FROM (SELECT {inner_select} AS val FROM t LIMIT {sample_size});
     """
     row = self._query(approx_count_query)[0]
     approx_count_distinct = row[0]
 
-    total_count_query = f'SELECT count(val) FROM (SELECT {inner_select} FROM t)'
+    total_count_query = f'SELECT count(val) FROM (SELECT {inner_select} as val FROM t)'
     total_count = self._query(total_count_query)[0][0]
 
     # Adjust the counts for the sample size.
@@ -427,7 +430,7 @@ class DatasetDuckDB(Dataset):
     if is_ordinal(leaf.dtype):
       min_max_query = f"""
         SELECT MIN(val) AS minVal, MAX(val) AS maxVal
-        FROM (SELECT {inner_select} FROM t);
+        FROM (SELECT {inner_select} as val FROM t);
       """
       row = self._query(min_max_query)[0]
       result.min_val, result.max_val = row
@@ -484,7 +487,7 @@ class DatasetDuckDB(Dataset):
     limit_query = f'LIMIT {limit}' if limit else ''
     # Select the actual value from the node.
     value_path = _make_value_path(path)
-    inner_select = _make_select_column(value_path, flatten=True, unnest=True, empty=False)
+    inner_select = _select_sql(value_path, flatten=True, unnest=True)
     query = f"""
       SELECT {outer_select} AS {value_column}, COUNT() AS {count_column}
       FROM (SELECT {inner_select} AS {inner_val} FROM t)
@@ -526,11 +529,41 @@ class DatasetDuckDB(Dataset):
       cols.append(column_from_identifier(UUID_COLUMN))
 
     self._validate_columns(cols)
-    select_query, columns_to_merge = self._create_select(
-      cols, resolve_span=resolve_span, combine_columns=combine_columns)
+
+    # Map a final column name to a list of temporary namespaced column names that need to be merged.
+    columns_to_merge: dict[str, dict[str, Column]] = {}
+    select_queries: list[str] = []
+
+    for column in cols:
+      path = column.path
+      # If the signal is vector-based, we don't need to select the actual data, just the uuids
+      # plus an arbitrarily nested array of `None`s`.
+      empty = bool(
+        column.signal_udf and
+        # We remove the last element of the path when checking the dtype because it's VALUE_KEY for
+        # signal transforms.
+        manifest.data_schema.get_field(path[:-1]).dtype == DataType.EMBEDDING)
+
+      select_sqls: list[str] = []
+      alias = column.alias or _unique_alias(column)
+      if alias not in columns_to_merge:
+        columns_to_merge[alias] = {}
+
+      duckdb_paths = self._column_to_duckdb_paths(column)
+      span_from = self._get_span_from(path)
+
+      for parquet_id, duckdb_path in duckdb_paths:
+        sql = _select_sql(
+          duckdb_path, flatten=False, unnest=False, empty=empty, span_from=span_from)
+        temp_column_name = alias if len(duckdb_paths) == 1 else f'{alias}/{parquet_id}'
+        select_sqls.append(f'{sql} AS "{temp_column_name}"')
+        columns_to_merge[alias][temp_column_name] = column
+
+      select_queries.append(', '.join(select_sqls))
+
     col_aliases: dict[str, PathTuple] = {col.alias: col.path for col in cols if col.alias}
     udf_aliases: dict[str, PathTuple] = {
-      col.alias or _unique_alias(col): col.path for col in cols if col.signal_udf
+      col.alias: col.path for col in cols if col.signal_udf and col.alias
     }
 
     # Filtering.
@@ -542,12 +575,13 @@ class DatasetDuckDB(Dataset):
 
     # Sorting.
     order_query = ''
-    sort_by = [normalize_path(path) for path in (sort_by or [])]
+    sort_by = cast(list[PathTuple], [normalize_path(path) for path in (sort_by or [])])
     if sort_by and not sort_order:
       raise ValueError('`sort_order` is required when `sort_by` is specified.')
 
     sort_cols_before_udf: list[str] = []
     sort_cols_after_udf: list[str] = []
+
     for path in sort_by:
       first_subpath = str(path[0])
       rest_of_path = path[1:]
@@ -562,7 +596,6 @@ class DatasetDuckDB(Dataset):
         path = (first_subpath, *prefix_path, *rest_of_path)
         # Select the value that comes from the actual UDF for sorting.
         path = _make_value_path(path)
-        sort_col = _make_select_column(path, flatten=True, unnest=False, empty=False)
       else:
         # Re-route the path if it starts with an alias by pointing it to the actual path.
         if first_subpath in col_aliases:
@@ -571,14 +604,9 @@ class DatasetDuckDB(Dataset):
         if path not in manifest.data_schema.leafs:
           raise ValueError(f'Can not sort by "{path}" since it is not a leaf field.')
 
-        sort_col, _ = self._create_select_column(
-          Column(path),
-          manifest,
-          flatten=True,
-          unnest=False,
-          resolve_span=False,
-          make_temp_alias=False)
+        path = self._leaf_path_to_duckdb_path(cast(PathTuple, path))
 
+      sort_col = _select_sql(path, flatten=True, unnest=False)
       has_repeated_field = any(subpath == PATH_WILDCARD for subpath in path)
       if has_repeated_field:
         sort_col = (f'list_min({sort_col})'
@@ -596,7 +624,7 @@ class DatasetDuckDB(Dataset):
 
     con = self.con.cursor()
     query = con.sql(f"""
-      SELECT {select_query} FROM t
+      SELECT {', '.join(select_queries)} FROM t
       {where_query}
       {order_query}
     """)
@@ -620,7 +648,14 @@ class DatasetDuckDB(Dataset):
                                                    signal.embedding)
         self._concept_model_db.sync(concept_model)
 
-      signal_column = udf_col.alias or _unique_alias(udf_col)
+      signal_alias = udf_col.alias or _unique_alias(udf_col)
+      temp_signal_cols = columns_to_merge[signal_alias]
+      if len(temp_signal_cols) != 1:
+        raise ValueError(
+          f'Unable to compute signal {signal.name}. Signal UDFs only operate on leafs, but got '
+          f'{len(temp_signal_cols)} underlying columns that contain data related to {udf_col.path}.'
+        )
+      signal_column = list(temp_signal_cols.keys())[0]
       input = df[signal_column]
 
       with DebugTimer(f'Computing signal "{signal}"'):
@@ -685,6 +720,12 @@ class DatasetDuckDB(Dataset):
         query = query.limit(limit, offset or 0)
 
       df = query.df()
+
+    if combine_columns:
+      all_columns: dict[str, Column] = {}
+      for col_dict in columns_to_merge.values():
+        all_columns.update(col_dict)
+      columns_to_merge = {'*': all_columns}
 
     for final_col_name, temp_columns in columns_to_merge.items():
       for temp_col_name, column in temp_columns.items():
@@ -755,37 +796,25 @@ class DatasetDuckDB(Dataset):
   def media(self, item_id: str, leaf_path: Path) -> MediaResult:
     raise NotImplementedError('Media is not yet supported for the DuckDB implementation.')
 
-  def _create_select_column(self,
-                            column: Column,
-                            manifest: DatasetManifest,
-                            flatten: bool,
-                            unnest: bool,
-                            resolve_span: bool,
-                            make_temp_alias: bool = True) -> tuple[str, list[str]]:
+  def _get_span_from(self, path: PathTuple) -> Optional[PathTuple]:
+    manifest = self.manifest()
     leafs = manifest.data_schema.leafs
-    path = column.path
-    span_path = path
-
     # Remove the value key so we can check the dtype from leafs.
-    if path[-1] == VALUE_KEY:
-      span_path = path[:-1]
+    span_path = path[:-1] if path[-1] == VALUE_KEY else path
     is_span = (span_path in leafs and leafs[span_path].dtype == DataType.STRING_SPAN)
-    span_from = _derived_from_path(path, manifest.data_schema) if resolve_span and is_span else None
-    # We doing a vector-based computation, we do not need to select the actual data, just the uuids
-    # plus an arbitrarily nested array of `None`s`.
-    empty = bool(
-      column.signal_udf and
-      # We remove the last element of the path when checking the dtype because it's VALUE_KEY for
-      # signal transforms.
-      manifest.data_schema.get_field(path[:-1]).dtype == DataType.EMBEDDING)
-    select_queries: list[str] = []
-    temp_column_names: list[str] = []
+    return _derived_from_path(path, manifest.data_schema) if is_span else None
 
+  def _leaf_path_to_duckdb_path(self, leaf_path: PathTuple) -> PathTuple:
+    ((_, duckdb_path),) = self._column_to_duckdb_paths(Column(leaf_path))
+    return duckdb_path
+
+  def _column_to_duckdb_paths(self, column: Column) -> list[tuple[str, PathTuple]]:
+    path = column.path
     parquet_manifests: list[Union[SourceManifest, SignalManifest]] = [
       self._source_manifest, *self._signal_manifests
     ]
+    duckdb_paths: list[tuple[str, PathTuple]] = []
 
-    manifests_with_path: list[Union[SourceManifest, SignalManifest]] = []
     for m in parquet_manifests:
       if not schema_contains_path(m.data_schema, path):
         # Skip this parquet file if it doesn't contain the path.
@@ -795,54 +824,20 @@ class DatasetDuckDB(Dataset):
         # Do not select UUID from the signal because it's already in the source.
         continue
 
-      manifests_with_path.append(m)
+      duckdb_path = path
+      parquet_id = 'source'
 
-    if not manifests_with_path:
+      if isinstance(m, SignalManifest):
+        duckdb_path = (m.parquet_id, *path[1:])
+        parquet_id = m.parquet_id
+
+      duckdb_paths.append((parquet_id, duckdb_path))
+
+    if not duckdb_paths:
       raise ValueError(f'Invalid path "{path}": No manifest contains path. Valid paths: '
                        f'{list(self.manifest().data_schema.leafs.keys())}')
 
-    for m in manifests_with_path:
-      temp_column_name = column.alias or _unique_alias(column)
-      if isinstance(m, SignalManifest):
-        select_path = (m.parquet_id, *path[1:])
-        if len(manifests_with_path) > 1:
-          # Non-leafs can have data in multiple manifests so we need to namespace.
-          temp_column_name = f'{temp_column_name}/{m.parquet_id}'
-      else:
-        select_path = path
-      col = _make_select_column(
-        select_path, flatten=flatten, unnest=unnest, empty=empty, span_from=span_from)
-      if make_temp_alias:
-        select_queries.append(f'{col} AS "{temp_column_name}"')
-        temp_column_names.append(temp_column_name)
-      else:
-        select_queries.append(col)
-
-    return ', '.join(select_queries), temp_column_names
-
-  def _create_select(self,
-                     columns: list[Column],
-                     resolve_span: bool,
-                     combine_columns: bool = False) -> tuple[str, dict[str, dict[str, Column]]]:
-    """Create the select statement."""
-    manifest = self.manifest()
-    # Map a final column name to a list of temporary namespaced column names that need to be merged.
-    alias_to_temp_col_names: dict[str, dict[str, Column]] = {}
-    select_queries: list[str] = []
-
-    for column in columns:
-      select_str, temp_column_names = self._create_select_column(
-        column, manifest, flatten=False, unnest=False, resolve_span=resolve_span)
-      # If `combine_columns` is True, we alias every column to `*` so that we can merge them all.
-      alias = '*' if combine_columns else (column.alias or _unique_alias(column))
-      if alias not in alias_to_temp_col_names:
-        alias_to_temp_col_names[alias] = {}
-      temp_name_to_column = alias_to_temp_col_names[alias]
-      for temp_col_name in temp_column_names:
-        temp_name_to_column[temp_col_name] = column
-
-      select_queries.append(select_str)
-    return ', '.join(select_queries), alias_to_temp_col_names
+    return duckdb_paths
 
   def _normalize_filters(self, filter_likes: Optional[Sequence[FilterLike]],
                          col_aliases: dict[str, PathTuple],
@@ -882,13 +877,8 @@ class DatasetDuckDB(Dataset):
     binary_ops = set(BinaryOp)
     unary_ops = set(UnaryOp)
     for filter in filters:
-      select_str, _ = self._create_select_column(
-        Column(filter.path),
-        manifest,
-        flatten=False,
-        unnest=False,
-        resolve_span=False,
-        make_temp_alias=False)
+      duckdb_path = self._leaf_path_to_duckdb_path(filter.path)
+      select_str = _select_sql(duckdb_path, flatten=False, unnest=False)
 
       if filter.op in binary_ops:
         op = BINARY_OP_TO_SQL[cast(BinaryOp, filter.op)]
@@ -965,7 +955,7 @@ def _inner_select(sub_paths: list[PathTuple],
   path_key = inner_var + ''.join([f"['{p}']" for p in current_sub_path])
   if len(sub_paths) == 1:
     if span_from:
-      derived_col = _make_select_column(span_from, flatten=False, unnest=False, empty=False)
+      derived_col = _select_sql(span_from, flatten=False, unnest=False)
       path_key = (f'{derived_col}[{path_key}.{TEXT_SPAN_START_FEATURE}+1:'
                   f'{path_key}.{TEXT_SPAN_END_FEATURE}]')
     return 'NULL' if empty else path_key
@@ -989,22 +979,21 @@ def _split_path_into_subpaths_of_lists(leaf_path: PathTuple) -> list[PathTuple]:
   return sub_paths
 
 
-def _make_select_column(leaf_path: Path,
-                        flatten: bool,
-                        unnest: bool,
-                        empty: bool,
-                        span_from: Optional[PathTuple] = None) -> str:
-  """Create a select column for a leaf path.
+def _select_sql(path: PathTuple,
+                flatten: bool,
+                unnest: bool,
+                empty: bool = False,
+                span_from: Optional[PathTuple] = None) -> str:
+  """Create a select column for a path.
 
   Args:
-    leaf_path: A path to a leaf feature. E.g. ['a', 'b', 'c'].
+    path: A path to a feature. E.g. ['a', 'b', 'c'].
     flatten: Whether to flatten the result.
     unnest: Whether to unnest the result.
     empty: Whether to return an empty list (used for embedding signals that don't need the data).
     span_from: The path this span is derived from. If specified, the span will be resolved
       to a substring of the original string.
   """
-  path = normalize_path(leaf_path)
   sub_paths = _split_path_into_subpaths_of_lists(path)
   selection = _inner_select(sub_paths, None, empty, span_from)
   # We only flatten when the result of a nested list to avoid segfault.
