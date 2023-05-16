@@ -609,19 +609,20 @@ class DatasetDuckDB(Dataset):
         manifest.data_schema.get_field(path[:-1]).dtype == DataType.EMBEDDING)
 
       select_sqls: list[str] = []
-      alias = column.alias or _unique_alias(column)
-      if alias not in columns_to_merge:
-        columns_to_merge[alias] = {}
+      final_col_name = column.alias or _unique_alias(column)
+      if final_col_name not in columns_to_merge:
+        columns_to_merge[final_col_name] = {}
 
       duckdb_paths = self._column_to_duckdb_paths(column)
-      span_from = self._get_span_from(path)
+      span_from = self._get_span_from(path) if resolve_span else None
 
       for parquet_id, duckdb_path in duckdb_paths:
         sql = _select_sql(
           duckdb_path, flatten=False, unnest=False, empty=empty, span_from=span_from)
-        temp_column_name = alias if len(duckdb_paths) == 1 else f'{alias}/{parquet_id}'
+        temp_column_name = (
+          final_col_name if len(duckdb_paths) == 1 else f'{final_col_name}/{parquet_id}')
         select_sqls.append(f'{sql} AS "{temp_column_name}"')
-        columns_to_merge[alias][temp_column_name] = column
+        columns_to_merge[final_col_name][temp_column_name] = column
 
       select_queries.append(', '.join(select_sqls))
 
