@@ -69,6 +69,7 @@ from .dataset import (
   NamedBins,
   SelectGroupsResult,
   SelectRowsResult,
+  SelectRowsSchemaResult,
   SortOrder,
   StatsResult,
   UnaryOp,
@@ -826,7 +827,7 @@ class DatasetDuckDB(Dataset):
   @override
   def select_rows_schema(self,
                          columns: Optional[Sequence[ColumnId]] = None,
-                         combine_columns: bool = False) -> Schema:
+                         combine_columns: bool = False) -> SelectRowsSchemaResult:
     """Returns the schema of the result of `select_rows` above with the same arguments."""
     if not combine_columns:
       raise NotImplementedError(
@@ -851,16 +852,20 @@ class DatasetDuckDB(Dataset):
 
     self._validate_columns(cols)
 
+    alias_udf_paths: dict[str, PathTuple] = {}
     col_schemas: list[Schema] = []
     for col in cols:
       dest_path = _col_destination_path(col)
       if col.signal_udf:
+        if col.alias:
+          alias_udf_paths[col.alias] = dest_path
         field = col.signal_udf.fields()
         field.signal = col.signal_udf.dict()
       else:
         field = self.manifest().data_schema.get_field(dest_path)
       col_schemas.append(_make_schema_from_path(dest_path, field))
-    return merge_schemas(col_schemas)
+    data_schema = merge_schemas(col_schemas)
+    return SelectRowsSchemaResult(data_schema=data_schema, alias_udf_paths=alias_udf_paths)
 
   @override
   def media(self, item_id: str, leaf_path: Path) -> MediaResult:
