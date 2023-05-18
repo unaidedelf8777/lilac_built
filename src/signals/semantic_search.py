@@ -19,7 +19,7 @@ class SemanticSearchSignal(TextEmbeddingModelSignal):
   name = 'semantic_search'
   display_name = 'Semantic Search'
 
-  query: Union[str, bytes]
+  query: str
 
   _embed_fn: Callable[[Iterable[RichData]], np.ndarray]
   _search_text_embedding: Optional[np.ndarray] = None
