@@ -204,8 +204,12 @@ class TextEmbeddingSignal(TextSignal):
   input_type = SignalInputType.TEXT
   compute_type = SignalInputType.TEXT
 
+  @override
   def fields(self) -> Field:
-    """Return the fields for the embedding."""
+    """NOTE: Override this method at your own risk if you want to add extra metadata.
+
+    Embeddings should not come with extra metadata.
+    """
     return field('embedding')
 
 
