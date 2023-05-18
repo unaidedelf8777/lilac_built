@@ -63,6 +63,7 @@ from .dataset import (
   FeatureValue,
   Filter,
   FilterLike,
+  FilterOp,
   GroupsSortBy,
   ListOp,
   MediaResult,
@@ -109,6 +110,8 @@ BINARY_OP_TO_SQL: dict[BinaryOp, str] = {
   BinaryOp.LESS: '<',
   BinaryOp.LESS_EQUAL: '<=',
 }
+
+SUPPORTED_OPS_ON_REPEATED: set[FilterOp] = set([UnaryOp.EXISTS])
 
 
 class DuckDBSelectGroupsResult(SelectGroupsResult):
@@ -374,13 +377,9 @@ class DatasetDuckDB(Dataset):
       current_field = Field(fields=manifest.data_schema.fields)
       for path_part in filter.path:
         if path_part == VALUE_KEY:
+          if not current_field.dtype:
+            raise ValueError(f'Unable to filter on path {filter.path}. The field has no value.')
           continue
-        if path_part == PATH_WILDCARD:
-          if filter.op == UnaryOp.EXISTS:
-            # exists is supported on a repeated field.
-            continue
-          raise ValueError(f'Unable to filter on path {filter.path}. '
-                           'Filtering on a repeated field is currently not supported.')
         if current_field.fields:
           if path_part not in current_field.fields:
             raise ValueError(f'Unable to filter on path {filter.path}. '
@@ -388,7 +387,7 @@ class DatasetDuckDB(Dataset):
           current_field = current_field.fields[str(path_part)]
           continue
         elif current_field.repeated_field:
-          if not isinstance(path_part, int) and not path_part.isdigit():
+          if (filter.op not in SUPPORTED_OPS_ON_REPEATED and not path_part.isdigit()):
             raise ValueError(f'Unable to filter on path {filter.path}. '
                              'Filtering must be on a specific index of a repeated field')
           current_field = current_field.repeated_field
@@ -397,14 +396,13 @@ class DatasetDuckDB(Dataset):
           raise ValueError(f'Unable to filter on path {filter.path}. '
                            f'Path part "{path_part}" is not defined on a primitive value.')
 
-  def _validate_columns(self, columns: Sequence[Column]) -> None:
-    manifest = self.manifest()
+  def _validate_columns(self, columns: Sequence[Column], schema: Schema) -> None:
     for column in columns:
       if column.signal_udf:
         path = column.path
 
         # Signal transforms must operate on a leaf field.
-        leaf = manifest.data_schema.leafs.get(path)
+        leaf = schema.leafs.get(path)
         if not leaf or not leaf.dtype:
           raise ValueError(f'Leaf "{path}" not found in dataset. '
                            'Signal transforms must operate on a leaf field.')
@@ -421,10 +419,12 @@ class DatasetDuckDB(Dataset):
         # us to remove python code that unwraps the value key before calling the signal.
         column.path = _make_value_path(column.path)
 
-      current_field = Field(fields=manifest.data_schema.fields)
+      current_field = Field(fields=schema.fields)
       path = column.path
       for path_part in path:
         if path_part == VALUE_KEY:
+          if not current_field.dtype:
+            raise ValueError(f'Unable to select path {path}. The field that has no value.')
           continue
         if current_field.fields:
           if path_part not in current_field.fields:
@@ -443,6 +443,31 @@ class DatasetDuckDB(Dataset):
         elif not current_field.dtype:
           raise ValueError(f'Unable to select path {path}. '
                            f'Path part "{path_part}" is not defined on a primitive value.')
+
+  def _validate_sort_path(self, path: PathTuple, schema: Schema) -> None:
+    current_field = Field(fields=schema.fields)
+    for path_part in path:
+      if path_part == VALUE_KEY:
+        if not current_field.dtype:
+          raise ValueError(f'Unable to sort by path {path}. The field that has no value.')
+        continue
+      if current_field.fields:
+        if path_part not in current_field.fields:
+          raise ValueError(f'Unable to sort by path {path}. '
+                           f'Path part "{path_part}" not found in the dataset.')
+        current_field = current_field.fields[path_part]
+        continue
+      elif current_field.repeated_field:
+        if path_part.isdigit():
+          raise ValueError(f'Unable to sort by path {path}. Selecting a specific index of '
+                           'a repeated field is currently not supported.')
+        if path_part != PATH_WILDCARD:
+          raise ValueError(f'Unable to sort by path {path}. '
+                           f'Path part "{path_part}" should be a wildcard.')
+        current_field = current_field.repeated_field
+      elif not current_field.dtype:
+        raise ValueError(f'Unable to sort by path {path}. '
+                         f'Path part "{path_part}" is not defined on a primitive value.')
 
   @override
   def stats(self, leaf_path: Path) -> StatsResult:
@@ -594,7 +619,7 @@ class DatasetDuckDB(Dataset):
         # Do not auto-compute dependencies, throw an error if they are not computed.
         col.path = self._prepare_signal(col.signal_udf, col.path, compute_dependencies=False)
 
-    self._validate_columns(cols)
+    self._validate_columns(cols, manifest.data_schema)
 
     # Map a final column name to a list of temporary namespaced column names that need to be merged.
     columns_to_merge: dict[str, dict[str, Column]] = {}
@@ -644,7 +669,7 @@ class DatasetDuckDB(Dataset):
     # Filtering.
     where_query = ''
     filters, udf_filters = self._normalize_filters(filters, col_aliases, udf_aliases)
-    filter_queries = self._create_where(filters, manifest)
+    filter_queries = self._create_where(filters)
     if filter_queries:
       where_query = f"WHERE {' AND '.join(filter_queries)}"
 
@@ -658,6 +683,8 @@ class DatasetDuckDB(Dataset):
     sort_cols_after_udf: list[str] = []
 
     for path in sort_by:
+      # We only allow sorting by nodes with a value.
+      path = _make_value_path(path)
       first_subpath = str(path[0])
       rest_of_path = path[1:]
       udf_path = udf_aliases.get(first_subpath)
@@ -669,16 +696,12 @@ class DatasetDuckDB(Dataset):
         # udf was applied to a list of "text" fields.
         prefix_path = [subpath for subpath in udf_path if subpath == PATH_WILDCARD]
         path = (first_subpath, *prefix_path, *rest_of_path)
-        # Select the value that comes from the actual UDF for sorting.
-        path = _make_value_path(path)
       else:
         # Re-route the path if it starts with an alias by pointing it to the actual path.
         if first_subpath in col_aliases:
           path = (*col_aliases[first_subpath], *rest_of_path)
 
-        if path not in manifest.data_schema.leafs:
-          raise ValueError(f'Can not sort by "{path}" since it is not a leaf field.')
-
+        self._validate_sort_path(path, manifest.data_schema)
         path = self._leaf_path_to_duckdb_path(cast(PathTuple, path))
 
       sort_col = _select_sql(path, flatten=True, unnest=False)
@@ -791,7 +814,7 @@ class DatasetDuckDB(Dataset):
       query = con.from_df(df)
 
       if udf_filters:
-        udf_filter_queries = self._create_where(udf_filters, manifest)
+        udf_filter_queries = self._create_where(udf_filters)
         if udf_filter_queries:
           query = query.filter(' AND '.join(udf_filter_queries))
 
@@ -849,10 +872,10 @@ class DatasetDuckDB(Dataset):
     if not combine_columns:
       raise NotImplementedError(
         'select_rows_schema with combine_columns=False is not yet supported.')
-
+    manifest = self.manifest()
     if not columns:
       # Select all columns.
-      columns = list(self.manifest().data_schema.fields.keys())
+      columns = list(manifest.data_schema.fields.keys())
 
     cols = [column_from_identifier(column) for column in columns or []]
     # Always return the UUID column.
@@ -867,7 +890,7 @@ class DatasetDuckDB(Dataset):
         # Do not auto-compute dependencies, throw an error if they are not computed.
         col.path = self._prepare_signal(col.signal_udf, col.path, compute_dependencies=False)
 
-    self._validate_columns(cols)
+    self._validate_columns(cols, manifest.data_schema)
 
     alias_udf_paths: dict[str, PathTuple] = {}
     col_schemas: list[Schema] = []
@@ -951,7 +974,7 @@ class DatasetDuckDB(Dataset):
           raise ValueError(f'Invalid filter: {filter}. Must be a tuple with 2 or 3 elements.')
         filter = Filter(path=normalize_path(path), op=op, value=value)
 
-      # Select the value from the filter.
+      # We only allow filtering by nodes with a value.
       filter.path = _make_value_path(filter.path)
 
       if str(filter.path[0]) in udf_aliases:
@@ -962,7 +985,7 @@ class DatasetDuckDB(Dataset):
     self._validate_filters(filters, col_aliases)
     return filters, udf_filters
 
-  def _create_where(self, filters: list[Filter], manifest: DatasetManifest) -> list[str]:
+  def _create_where(self, filters: list[Filter]) -> list[str]:
     if not filters:
       return []
     filter_queries: list[str] = []
