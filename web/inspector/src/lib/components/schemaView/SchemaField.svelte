@@ -1,5 +1,5 @@
 <script lang="ts">
-  import {getDatasetViewContext} from '$lib/stores/datasetViewStore';
+  import {getDatasetViewContext, isPathVisible} from '$lib/stores/datasetViewStore';
   import {
     PATH_WILDCARD,
     VALUE_KEY,
@@ -11,6 +11,7 @@
     type LilacSchema,
     type LilacSchemaField,
     type ListOp,
+    type Path,
     type UnaryOp
   } from '$lilac';
   import {Checkbox, OverflowMenu, Tag} from 'carbon-components-svelte';
@@ -25,6 +26,7 @@
   export let schema: LilacSchema;
   export let field: LilacSchemaField;
   export let indent = 0;
+  export let aliasMapping: Record<string, Path> | undefined;
 
   const FILTER_SHORTHANDS: Record<BinaryOp | UnaryOp | ListOp, string> = {
     equals: '=',
@@ -54,7 +56,7 @@
   $: children = childFields(field);
   $: hasChildren = children.length > 0;
 
-  $: isVisible = $datasetViewStore.visibleColumns.some(p => pathIsEqual(p, path));
+  $: isVisible = isPathVisible($datasetViewStore.visibleColumns, path, aliasMapping);
 
   $: isSortedBy = $datasetViewStore.queryOptions.sort_by?.some(p => pathIsEqual(p, alias || path));
   $: sortOrder = $datasetViewStore.queryOptions.sort_order;
@@ -86,7 +88,7 @@
 
 {#if field.repeated_field}
   <!-- Skip over fields that contain repeated fields -->
-  <svelte:self field={field.repeated_field} {indent} {schema} />
+  <svelte:self field={field.repeated_field} {indent} {schema} {aliasMapping} />
 {:else}
   <div
     class="flex w-full flex-row items-center border-b border-gray-200 px-4 py-2 hover:bg-gray-100"
@@ -178,7 +180,7 @@
     <div transition:slide|local>
       {#if children.length}
         {#each children as childField}
-          <svelte:self {schema} field={childField} indent={indent + 1} />
+          <svelte:self {schema} field={childField} indent={indent + 1} {aliasMapping} />
         {/each}
       {/if}
     </div>

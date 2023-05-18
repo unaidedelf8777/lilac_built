@@ -81,7 +81,7 @@ export function isOrdinal(dtype: DataType) {
 }
 
 export function serializePath(path: Path): string {
-  return path.map(p => `"${p}"`).join('.');
+  return path.map(p => (p.includes('.') ? `"${p}"` : p)).join('.');
 }
 
 export function isSortableField(field: LilacSchemaField) {
