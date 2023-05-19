@@ -17,7 +17,15 @@ from pydantic import (
 
 from ..schema import VALUE_KEY, Path, PathTuple, Schema, normalize_path
 from ..signals.concept_scorer import ConceptScoreSignal
-from ..signals.signal import Signal, resolve_signal
+from ..signals.semantic_search import SemanticSearchSignal
+from ..signals.signal import (
+  Signal,
+  TextEmbeddingModelSignal,
+  TextEmbeddingSignal,
+  TextSignal,
+  TextSplitterSignal,
+  resolve_signal,
+)
 from ..tasks import TaskId
 
 # Threshold for rejecting certain queries (e.g. group by) for columns with large cardinality.
@@ -115,13 +123,17 @@ class GroupsSortBy(str, enum.Enum):
   VALUE = 'value'
 
 
+AllSignalTypes = Union[SemanticSearchSignal, ConceptScoreSignal, TextEmbeddingModelSignal,
+                       TextEmbeddingSignal, TextSplitterSignal, TextSignal, Signal]
+
+
 class Column(BaseModel):
   """A column in the dataset."""
   path: PathTuple
   alias: Optional[str]  # This is the renamed column during querying and response.
 
   # Defined when the feature is another column.
-  signal_udf: Optional[Union[ConceptScoreSignal, Signal]] = None
+  signal_udf: Optional[AllSignalTypes] = None
 
   class Config:
     smart_union = True
