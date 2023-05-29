@@ -2,7 +2,7 @@
 import multiprocessing
 from typing import Iterable, Optional, Union
 
-import tensorflow as tf
+import numpy as np
 from pydantic import BaseModel
 from pydantic import Field as PydanticField
 from typing_extensions import override
@@ -10,20 +10,9 @@ from typing_extensions import override
 # mypy: disable-error-code="attr-defined"
 from datasets import ClassLabel, DatasetDict, Sequence, Value, load_dataset, load_from_disk
 
-from ...schema import (
-  PARQUET_FILENAME_PREFIX,
-  UUID_COLUMN,
-  DataType,
-  Field,
-  Item,
-  Schema,
-  arrow_dtype_to_dtype,
-)
-from ...tasks import TaskStepId, progress
-from ..dataset_utils import write_items_to_parquet
-from .source import Source, SourceProcessResult
-
-TFDSElement = Union[dict, tf.RaggedTensor, tf.Tensor]
+from ...schema import UUID_COLUMN, DataType, Field, Item, arrow_dtype_to_dtype
+from .pandas_source import PandasDataset
+from .source import Source, SourceSchema
 
 HF_SPLIT_COLUMN = '__hfsplit__'
 
@@ -33,31 +22,9 @@ DEFAULT_LOCAL_SPLIT_NAME = 'default'
 
 class SchemaInfo(BaseModel):
   """Information about the processed huggingface schema."""
-  data_schema: Schema
+  fields: dict[str, Field] = {}
   class_labels: dict[str, list[str]]
   num_items: int
-
-
-def _convert_to_items(hf_dataset_dict: DatasetDict, class_labels: dict[str, list[str]],
-                      split: Optional[str]) -> Iterable[Item]:
-  """Convert a huggingface split datasets to an iterable of items."""
-  if split:
-    split_names = [split]
-  else:
-    split_names = list(hf_dataset_dict.keys())
-
-  for split_name in split_names:
-    split_dataset = hf_dataset_dict[split_name]
-    for example in split_dataset:
-      # Replace the class labels with strings.
-      for feature_name in class_labels.keys():
-        if feature_name in example:
-          example[feature_name] = class_labels[feature_name][example[feature_name]]
-
-      # Inject the split name.
-      example[HF_SPLIT_COLUMN] = split_name
-
-      yield example
 
 
 def _infer_field(feature_value: Union[Value, dict]) -> Field:
@@ -116,8 +83,7 @@ def hf_schema_to_schema(hf_dataset_dict: DatasetDict, split: Optional[str]) -> S
   # Add UUID to the Schema.
   fields[UUID_COLUMN] = Field(dtype=DataType.STRING)
 
-  return SchemaInfo(
-    data_schema=Schema(fields=fields), class_labels=class_labels, num_items=num_items)
+  return SchemaInfo(fields=fields, class_labels=class_labels, num_items=num_items)
 
 
 class HuggingFaceDataset(Source):
@@ -142,34 +108,62 @@ class HuggingFaceDataset(Source):
   load_from_disk: Optional[bool] = PydanticField(
     description='Load from local disk instead of the hub.', default=False)
 
+  _dataset_dict: DatasetDict
+  _schema_info: SchemaInfo
+
   @override
-  def process(
-    self,
-    output_dir: str,
-    task_step_id: Optional[TaskStepId] = None,
-  ) -> SourceProcessResult:
+  def prepare(self) -> None:
     if self.load_from_disk:
       # Load from disk.
       hf_dataset_dict = {DEFAULT_LOCAL_SPLIT_NAME: load_from_disk(self.dataset_name)}
     else:
       hf_dataset_dict = load_dataset(
         self.dataset_name, self.config_name, num_proc=multiprocessing.cpu_count())
+    self._dataset_dict = hf_dataset_dict
+    self._schema_info = hf_schema_to_schema(self._dataset_dict, self.split)
 
-    schema_info = hf_schema_to_schema(hf_dataset_dict, self.split)
+  @override
+  def source_schema(self) -> SourceSchema:
+    return SourceSchema(fields=self._schema_info.fields, num_items=self._schema_info.num_items)
 
-    items = progress(
-      _convert_to_items(hf_dataset_dict, schema_info.class_labels, self.split),
-      task_step_id=task_step_id,
-      estimated_len=schema_info.num_items,
-      step_description=f'Reading from {self.dataset_name}...')
+  @override
+  def process(self) -> Iterable[Item]:
+    if self.split:
+      split_names = [self.split]
+    else:
+      split_names = list(self._dataset_dict.keys())
 
-    filepath, num_items = write_items_to_parquet(
-      items=items,
-      output_dir=output_dir,
-      schema=schema_info.data_schema,
-      filename_prefix=PARQUET_FILENAME_PREFIX,
-      shard_index=0,
-      num_shards=1)
+    for split_name in split_names:
+      split_dataset = self._dataset_dict[split_name]
 
-    return SourceProcessResult(
-      filepaths=[filepath], data_schema=schema_info.data_schema, images=None, num_items=num_items)
+      pd_dataset = PandasDataset(split_dataset.to_pandas())
+      pd_dataset.prepare()
+
+      for example in pd_dataset.process():
+        # Replace the class labels with strings.
+        for feature_name in self._schema_info.class_labels.keys():
+          if feature_name in example:
+            example[feature_name] = self._schema_info.class_labels[feature_name][
+              example[feature_name]]
+
+        # Inject the split name.
+        example[HF_SPLIT_COLUMN] = split_name
+
+        # If there are multiple splits, change the key to prefix with the split to avoid collisions.
+        if len(split_names) > 1:
+          example[UUID_COLUMN] = f'{split_name}-{example[UUID_COLUMN]}'
+
+        # Huggingface Sequences are represented as np.arrays. Convert them to lists.
+        example = _np_array_to_list_deep(example)
+
+        yield example
+
+
+def _np_array_to_list_deep(item: Item) -> Item:
+  """Convert all numpy arrays to lists."""
+  for key, value in item.items():
+    if isinstance(value, np.ndarray):
+      item[key] = value.tolist()
+    elif isinstance(value, dict):
+      item[key] = _np_array_to_list_deep(value)
+  return item

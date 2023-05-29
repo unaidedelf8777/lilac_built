@@ -1,12 +1,17 @@
 """Interface for implementing a source."""
 
 import abc
-from typing import ClassVar, Optional
+from typing import ClassVar, Iterable, Optional
 
 from pydantic import BaseModel, validator
 
-from ...schema import ImageInfo, Schema
-from ...tasks import TaskStepId
+from ...schema import Field, ImageInfo, Item, Schema
+
+
+class SourceSchema(BaseModel):
+  """The schema of a source."""
+  fields: dict[str, Field]
+  num_items: Optional[int]
 
 
 class SourceProcessResult(BaseModel):
@@ -42,16 +47,30 @@ class Source(abc.ABC, BaseModel):
     return cls.name
 
   @abc.abstractmethod
-  def process(
-    self,
-    output_dir: str,
-    task_step_id: Optional[TaskStepId] = None,
-  ) -> SourceProcessResult:
+  def source_schema(self) -> SourceSchema:
+    """Return the source schema for this source.
+
+    Returns
+      A SourceSchema with
+        fields: mapping top-level columns to fields that describes the schema of the source.
+        num_items: the number of items in the source, used for progress.
+
+    """
+    pass
+
+  def prepare(self) -> None:
+    """Prepare the source.
+
+    This allows the source to do setup outside the constructor, but before its processed. This
+    avoids potentially expensive computation the pydantic model is deserialized.
+    """
+    pass
+
+  @abc.abstractmethod
+  def process(self) -> Iterable[Item]:
     """Process the source upload request.
 
     Args:
-      output_dir: The directory to write the output files to.
-      shards_loader: The function to use to load the shards. If None, the default shards loader
       task_step_id: The TaskManager `task_step_id` for this process run. This is used to update the
         progress of the task.
     """
