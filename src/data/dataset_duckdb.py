@@ -39,6 +39,7 @@ from ..schema import (
   normalize_path,
   signal_compute_type_supports_dtype,
 )
+from ..signals.semantic_similarity import SemanticSimilaritySignal
 from ..signals.signal import (
   EMBEDDING_KEY,
   Signal,
@@ -628,7 +629,13 @@ class DatasetDuckDB(Dataset):
     self._validate_columns(cols, manifest.data_schema)
 
     searches = self._normalize_searches(searches)
-    search_udfs = self._search_udfs(searches)
+    search_udfs, _, search_sorts = self._search_udfs(searches)
+    if search_sorts:
+      if not sort_by:
+        # Override the sort by by the first search sort order.
+        search_sort_by, sort_order = search_sorts[0]
+        sort_by = [search_sort_by]
+
     cols.extend(search_udfs)
     # Map a final column name to a list of temporary namespaced column names that need to be merged.
     columns_to_merge: dict[str, dict[str, Column]] = {}
@@ -897,7 +904,7 @@ class DatasetDuckDB(Dataset):
     self._validate_columns(cols, manifest.data_schema)
 
     searches = self._normalize_searches(searches)
-    search_udfs = self._search_udfs(searches)
+    search_udfs, search_results_paths, search_sort_bys = self._search_udfs(searches)
     cols.extend(search_udfs)
 
     alias_udf_paths: dict[str, PathTuple] = {}
@@ -913,15 +920,14 @@ class DatasetDuckDB(Dataset):
         field = self.manifest().data_schema.get_field(dest_path)
       col_schemas.append(_make_schema_from_path(dest_path, field))
 
-    search_results_paths: list[PathTuple] = [
-      _col_destination_path(search) for search in search_udfs
-    ]
-
     data_schema = merge_schemas(col_schemas)
     return SelectRowsSchemaResult(
+      namespace=self.namespace,
+      dataset_name=self.dataset_name,
       data_schema=data_schema,
       alias_udf_paths=alias_udf_paths,
-      search_results_paths=search_results_paths)
+      search_results_paths=search_results_paths,
+      sort_results=search_sort_bys)
 
   @override
   def media(self, item_id: str, leaf_path: Path) -> MediaResult:
@@ -1016,11 +1022,11 @@ class DatasetDuckDB(Dataset):
     for search in search_likes:
       # Normalize `FilterLike` to `Filter`.
       if not isinstance(search, Search):
-        if len(search) == 3:
-          path, op, query = search
+        if len(search) == 4:
+          path, op, query, embedding = search
         else:
-          raise ValueError(f'Invalid search: {search}. Must be a tuple with  3 elements.')
-        search = Search(path=normalize_path(path), type=op, query=query)
+          raise ValueError(f'Invalid search: {search}. Must be a tuple with 4 elements.')
+        search = Search(path=normalize_path(path), type=op, query=query, embedding=embedding)
 
       field = self.manifest().data_schema.get_field(search.path)
       if field.dtype != DataType.STRING:
@@ -1030,16 +1036,35 @@ class DatasetDuckDB(Dataset):
 
     return searches
 
-  def _search_udfs(self, searches: list[Search]) -> list[Column]:
+  def _search_udfs(
+      self,
+      searches: list[Search]) -> tuple[list[Column], list[PathTuple], list[tuple[Path, SortOrder]]]:
     """Create a UDF for each search for finding the location of the text with spans."""
     search_udfs: list[Column] = []
+    output_columns: list[PathTuple] = []
+    sort_bys: list[tuple[Path, SortOrder]] = []
     for i, search in enumerate(searches):
       if search.type == SearchType.CONTAINS:
-        search_udfs.append(Column(path=search.path, signal_udf=SubstringSignal(query=search.query)))
+        udf = Column(path=search.path, signal_udf=SubstringSignal(query=search.query))
+        search_udfs.append(udf)
+        # The output to be selected is an array of results.
+        output_columns.append((*_col_destination_path(udf), PATH_WILDCARD))
+      elif search.type == SearchType.SEMANTIC:
+        if not search.embedding:
+          raise ValueError(f'Please provide an embedding for semantic search. Got search: {search}')
+
+        signal_path = (*search.path, search.embedding, PATH_WILDCARD, EMBEDDING_KEY)
+        similarity_signal = SemanticSimilaritySignal(query=search.query, embedding=search.embedding)
+        alias = similarity_signal.key()
+        udf = Column(path=signal_path, signal_udf=similarity_signal, alias=similarity_signal.key())
+        search_udfs.append(udf)
+
+        output_columns.append(_col_destination_path(udf))
+        sort_bys.append(((alias,), SortOrder.DESC))
       else:
         raise ValueError(f'Unknown search operator {search.type}.')
 
-    return search_udfs
+    return search_udfs, output_columns, sort_bys
 
   def _create_where(self, filters: list[Filter], searches: list[Search] = []) -> list[str]:
     if not filters and not searches:
@@ -1053,6 +1078,9 @@ class DatasetDuckDB(Dataset):
       if search.type == SearchType.CONTAINS:
         sql_op = 'ILIKE'
         query_val = f"'%{search.query}%'"
+      elif search.type == SearchType.SEMANTIC:
+        # Semantic search doesn't filter, it just sorts.
+        continue
       else:
         raise ValueError(f'Unknown search operator {search.type}.')
 

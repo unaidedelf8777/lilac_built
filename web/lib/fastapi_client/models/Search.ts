@@ -11,5 +11,6 @@ export type Search = {
     path: (Array<string> | string);
     type: SearchType;
     query: string;
+    embedding?: string;
 };
 
