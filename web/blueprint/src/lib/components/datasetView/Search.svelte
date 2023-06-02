@@ -37,10 +37,10 @@
   let defaultEmbedding: string | undefined;
   let selectedEmbedding: string | undefined;
 
-  const tabs: {[key: number]: 'Keyword' | 'Semantic' | 'Conceptual'} = {
+  const tabs: {[key: number]: 'Keyword' | 'Semantic' | 'Concepts'} = {
     0: 'Keyword',
     1: 'Semantic',
-    2: 'Conceptual'
+    2: 'Concepts'
   };
 
   let selectedTabIndex = 0;
@@ -236,7 +236,7 @@
           query: semanticSearchText
         }
       ];
-    } else if (selectedTab === 'Conceptual') {
+    } else if (selectedTab === 'Concepts') {
       // TODO: Implement concept search.
     }
   };
@@ -277,12 +277,12 @@
     </Select>
   </div>
   <!-- Search boxes -->
-  <div class="search-container flex flex-row items-end">
+  <div class="search-container flex w-full flex-row">
     <div class="w-full">
       <Tabs class="flex flex-row" bind:selected={selectedTabIndex}>
-        <Tab disabled={false}>{tabs[0]}</Tab>
-        <Tab disabled={false}>{tabs[1]}</Tab>
-        <Tab disabled={false}>{tabs[2]}</Tab>
+        <Tab>{tabs[0]}</Tab>
+        <Tab>{tabs[1]}</Tab>
+        <Tab>{tabs[2]}</Tab>
         <svelte:fragment slot="content">
           <div class="flex flex-row">
             <div class="-ml-6 mr-2 flex h-10 items-center">
@@ -302,18 +302,21 @@
             <!-- Keyword input -->
             <TabContent class="w-full">
               <TextInput
+                placeholder="Search by keywords"
                 disabled={!keywordSearchEnabled}
                 bind:value={keywordSearchText}
                 on:keydown={e => (e.key == 'Enter' ? search() : null)}
               />
             </TabContent>
+
+            <!-- Semantic input -->
             <TabContent class="w-full">
-              <!-- Semantic input -->
               <div class="flex flex-row items-start justify-items-start">
                 <TextInput
                   helperText={isEmbeddingComputed
                     ? ''
                     : 'No index found. Please run the embedding index.'}
+                  placeholder="Search by natural language"
                   disabled={!semanticSearchEnabled}
                   bind:value={semanticSearchText}
                   on:keydown={e => (e.key == 'Enter' ? search() : null)}
@@ -345,9 +348,14 @@
               </div>
             </TabContent>
 
+            <!-- Concept input -->
             <TabContent class="w-full">
-              <!-- Concept input -->
-              <TextInput class="w-full" disabled={true} value={conceptSearchText} />
+              <TextInput
+                class="w-full"
+                placeholder={'Search by concepts'}
+                disabled={true}
+                value={conceptSearchText}
+              />
             </TabContent>
           </div>
         </svelte:fragment>
@@ -356,16 +364,17 @@
   </div>
 
   <div class="ml-2 mt-10 flex h-full">
-    <Button disabled={selectedPath == null || !searchEnabled} on:click={() => search()} size="small"
-      >Search</Button
+    <Button
+      disabled={selectedPath == null || !searchEnabled}
+      on:click={() => search()}
+      size="small"
     >
+      Search
+    </Button>
   </div>
 </div>
 
 <style lang="postcss">
-  .search-container {
-    width: 35rem;
-  }
   :global(.bx--tabs__nav) {
     @apply flex w-full flex-row;
   }
