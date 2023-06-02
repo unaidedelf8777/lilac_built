@@ -1,7 +1,7 @@
 <script lang="ts">
   import {queryDatasetSchema} from '$lib/queries/datasetQueries';
   import {getDatasetViewContext} from '$lib/stores/datasetViewStore';
-  import {getField, listFields} from '$lilac';
+  import {childFields, getField} from '$lilac';
   import {Select, SelectItem} from 'carbon-components-svelte';
   import type {JSONSchema7} from 'json-schema';
   import {getCommandSignalContext} from '../CommandSignals.svelte';
@@ -22,8 +22,8 @@
   // Find all existing pre-computed embeddings for the current split from the schema
   $: precomputedEmbs =
     $ctx.path && $schema.data
-      ? listFields(getField($schema.data, $ctx.path)).filter(
-          f => f.signal != null && listFields(f).some(f => f.dtype === 'embedding')
+      ? childFields(getField($schema.data, $ctx.path)).filter(
+          f => f.signal != null && childFields(f).some(f => f.dtype === 'embedding')
         )
       : undefined;
 

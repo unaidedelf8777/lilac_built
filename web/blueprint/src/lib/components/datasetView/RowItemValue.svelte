@@ -1,20 +1,22 @@
 <script lang="ts">
-  import {isPathVisible} from '$lib/stores/datasetViewStore';
   /**
    * Component that renders a single value from a row in the dataset row view
    * In the case of strings with string_spans, it will render the derived string spans as well
    */
+  import {querySelectRowsSchema} from '$lib/queries/datasetQueries';
+  import {getDatasetContext} from '$lib/stores/datasetStore';
+  import {getDatasetViewContext, getSelectRowsOptions} from '$lib/stores/datasetViewStore';
+
   import {notEmpty} from '$lib/utils';
+  import {getVisibleFields} from '$lib/view_utils';
   import {
     L,
     formatValue,
     getValueNodes,
     isOrdinal,
     listFieldParents,
-    listFields,
-    pathIncludes,
+    pathIsEqual,
     type LilacSchema,
-    type LilacSchemaField,
     type LilacValueNode,
     type Path
   } from '$lilac';
@@ -22,10 +24,20 @@
 
   export let path: Path;
   export let row: LilacValueNode;
-  export let visibleColumns: Path[];
-  export let searchResultsPaths: Path[];
   export let schema: LilacSchema;
-  export let aliasMapping: Record<string, Path> | undefined;
+
+  let datasetViewStore = getDatasetViewContext();
+  let datasetStore = getDatasetContext();
+
+  $: selectOptions = getSelectRowsOptions($datasetViewStore);
+
+  $: selectRowsSchema = selectOptions
+    ? querySelectRowsSchema(
+        $datasetViewStore.namespace,
+        $datasetViewStore.datasetName,
+        selectOptions
+      )
+    : undefined;
 
   $: valueNodes = getValueNodes(row, path);
   $: field = L.field(valueNodes[0]);
@@ -42,47 +54,26 @@
 
   // If type is a string, figure out if there are any children that are string_span
   // Only do this if the column is visible, and it isn't a repeated field
+  $: visibleFields = getVisibleFields($datasetViewStore, $datasetStore, field);
+
   $: stringSpanFields =
     showValue && field && dtype === 'string' && valueNodes.length === 1
-      ? getDerivedStringSpanFields(field)
+      ? getVisibleFields($datasetViewStore, $datasetStore, field, 'string_span')
       : [];
 
-  // For string fields, find the derived search span fields.
-  $: searchSpanFields =
-    showValue && field && dtype === 'string' && valueNodes.length === 1
-      ? getDerivedSearchSpanFields(field)
+  // Only find the 'contains' searches for keyword search, since this is displayed differently.
+  $: keywordSearchSpanFields =
+    $datasetViewStore && $datasetViewStore.queryOptions.searches
+      ? visibleFields.filter(field => {
+          const searchResultsPaths = $selectRowsSchema?.data?.searchResultsPaths || [];
+          for (const [i, searchPath] of searchResultsPaths.entries()) {
+            if (pathIsEqual(field.path, searchPath)) {
+              return ($datasetViewStore.queryOptions.searches || [])[i].type === 'contains';
+            }
+          }
+          return false;
+        })
       : [];
-
-  /**
-   * Get child fields that are of string_span type.
-   */
-  function getDerivedStringSpanFields(field: LilacSchemaField): LilacSchemaField[] {
-    if (!field) return [];
-    return (
-      listFields(field)
-        // Filter for string spans
-        .filter(field => field.dtype === 'string_span')
-        // Filter for visible columns
-        .filter(field => isPathVisible(visibleColumns, field.path, aliasMapping))
-    );
-  }
-
-  /**
-   * Get child fields that are searches.
-   */
-  function getDerivedSearchSpanFields(field: LilacSchemaField): LilacSchemaField[] {
-    if (!field) return [];
-    return (
-      listFields(field)
-        // Filter for string spans
-        .filter(field => field.dtype === 'string_span')
-        // Filter for visible columns
-        .filter(field =>
-          // Enables search results to be highlighted.
-          searchResultsPaths.some(searchPath => pathIncludes(field.path, searchPath))
-        )
-    );
-  }
 </script>
 
 {#if showValue}
@@ -95,10 +86,8 @@
       <StringSpanHighlight
         text={formatValue(values[0])}
         {stringSpanFields}
-        {searchSpanFields}
+        {keywordSearchSpanFields}
         {row}
-        {visibleColumns}
-        {aliasMapping}
       />
     </div>
   </div>

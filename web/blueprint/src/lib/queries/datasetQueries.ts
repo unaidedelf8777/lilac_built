@@ -1,4 +1,3 @@
-import {datasetKey, datasetStores} from '$lib/stores/datasetViewStore';
 import {
   ApiError,
   DataLoadersService,
@@ -63,6 +62,7 @@ export const queryManyDatasetStats = createParallelApiQueries(
   DatasetsService.getStats,
   DATASETS_TAG
 );
+
 export const querySelectRows = createApiQuery(function selectRows(
   namespace: string,
   datasetName: string,
@@ -82,19 +82,8 @@ export const querySelectRowsSchema = createApiQuery(
     select: res => {
       return {
         schema: deserializeSchema(res.data_schema, res.alias_udf_paths as Record<string, Path>),
-        searchResultsPaths: res.search_results_paths as Path[],
-        namespace: res.namespace,
-        datasetName: res.dataset_name
+        searchResultsPaths: res.search_results_paths as Path[]
       };
-    },
-    onSuccess: ({namespace, datasetName, searchResultsPaths}) => {
-      // TODO(nsthorat): We shouldn't mutating the global store here. This is surprising from an
-      // API query.
-      // https://github.com/lilacai/lilac/issues/329
-      for (const searchResultPath of searchResultsPaths) {
-        datasetStores[datasetKey(namespace, datasetName)].addVisibleColumn(searchResultPath);
-      }
-      // TODO(nsthorat): Add visible sort by to the state.
     }
   }
 );
