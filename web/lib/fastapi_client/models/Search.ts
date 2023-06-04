@@ -2,15 +2,15 @@
 /* tslint:disable */
 /* eslint-disable */
 
-import type { SearchType } from './SearchType';
+import type { ConceptQuery } from './ConceptQuery';
+import type { KeywordQuery } from './KeywordQuery';
+import type { SemanticQuery } from './SemanticQuery';
 
 /**
  * A search on a column.
  */
 export type Search = {
     path: (Array<string> | string);
-    type: SearchType;
-    query: string;
-    embedding?: string;
+    query: (KeywordQuery | SemanticQuery | ConceptQuery);
 };
 

@@ -26,6 +26,8 @@
   export let text: string;
   export let conceptName: string | null;
   export let conceptNamespace: string | null;
+  // The coordinates of the click so we can position the popup next to the cursor.
+  export let clickPosition: {x: number; y: number} | undefined;
 
   $: searchPath = getSearchPath($datasetViewStore, $datasetStore);
 
@@ -54,9 +56,11 @@
 
     datasetViewStore.addSearch({
       path: [serializePath(searchPath)],
-      type: 'semantic',
-      query: text,
-      embedding
+      query: {
+        type: 'semantic',
+        search: text,
+        embedding
+      }
     });
   };
 </script>
@@ -64,7 +68,8 @@
 <div
   use:clickOutside={() => dispatch('close')}
   transition:fade={{duration: 60}}
-  class="absolute left-0 z-10 inline-flex translate-y-6 flex-col gap-y-4 divide-gray-200 rounded border border-gray-200 bg-white p-1 shadow"
+  style={clickPosition != null ? `left: ${clickPosition.x}px; top: ${clickPosition.y}px` : ''}
+  class="absolute z-10 inline-flex -translate-x-1/2 translate-y-6 flex-col gap-y-4 divide-gray-200 rounded border border-gray-200 bg-white p-1 shadow"
 >
   {#if conceptName != null && conceptNamespace != null}
     <div class="flex flex-row px-4 pt-2">
