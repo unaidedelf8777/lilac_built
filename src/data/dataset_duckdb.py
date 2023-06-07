@@ -600,10 +600,10 @@ class DatasetDuckDB(Dataset):
     return DuckDBSelectGroupsResult(self._query_df(query))
 
   def _sorting_by_topk_of_signal(self, limit: Optional[int], sort_order: Optional[SortOrder],
-                                 sort_cols_after_udf: list[str], signal_column: str) -> bool:
+                                 sort_udf_aliases: list[str], signal_column: str) -> bool:
     """Returns True if the query is sorting by the topk of a signal column."""
-    return bool(limit and sort_order == SortOrder.DESC and sort_cols_after_udf and
-                self._path_to_col(signal_column) == sort_cols_after_udf[0])
+    return bool(limit and sort_order == SortOrder.DESC and sort_udf_aliases and
+                signal_column == sort_udf_aliases[0])
 
   def _normalize_columns(self, columns: Optional[Sequence[ColumnId]],
                          schema: Schema) -> list[Column]:
@@ -745,8 +745,9 @@ class DatasetDuckDB(Dataset):
     # We only support a single sort order for now. Choose the first one as they must all be the
     # same.
     sort_order = sort_results[0].order if sort_results else None
-    sort_cols_before_udf: list[str] = []
-    sort_cols_after_udf: list[str] = []
+    sort_sql_before_udf: list[str] = []
+    sort_sql_after_udf: list[str] = []
+    sort_udf_aliases: list[str] = []
 
     for path in sort_by:
       # We only allow sorting by nodes with a value.
@@ -769,37 +770,38 @@ class DatasetDuckDB(Dataset):
         self._validate_sort_path(path, manifest.data_schema)
         path = self._leaf_path_to_duckdb_path(cast(PathTuple, path))
 
-      sort_col = _select_sql(path, flatten=True, unnest=False)
+      sort_sql = _select_sql(path, flatten=True, unnest=False)
       has_repeated_field = any(subpath == PATH_WILDCARD for subpath in path)
       if has_repeated_field:
-        sort_col = (f'list_min({sort_col})'
-                    if sort_order == SortOrder.ASC else f'list_max({sort_col})')
+        sort_sql = (f'list_min({sort_sql})'
+                    if sort_order == SortOrder.ASC else f'list_max({sort_sql})')
 
       # Separate sort columns into two groups: those that need to be sorted before and after UDFs.
       if udf_path:
-        sort_cols_after_udf.append(sort_col)
+        sort_sql_after_udf.append(sort_sql)
+        sort_udf_aliases.append(path[0])
       else:
-        sort_cols_before_udf.append(sort_col)
+        sort_sql_before_udf.append(sort_sql)
 
-    if sort_cols_before_udf:
-      order_query = (f'ORDER BY {", ".join(sort_cols_before_udf)} '
+    if sort_sql_before_udf:
+      order_query = (f'ORDER BY {", ".join(sort_sql_before_udf)} '
                      f'{cast(SortOrder, sort_order).value}')
 
     con = self.con.cursor()
 
     limit_query = ''
-    if limit and not sort_cols_after_udf:
+    if limit and not sort_sql_after_udf:
       limit_query = f'LIMIT {limit} OFFSET {offset or 0}'
 
-    query = con.execute(f"""
+    df = con.execute(f"""
       SELECT {', '.join(select_queries)} FROM t
       {where_query}
       {order_query}
       {limit_query}
-    """)
+    """).df()
 
     # Download the data so we can run UDFs on it in Python.
-    df = _replace_nan_with_none(query.df())
+    df = _replace_nan_with_none(df)
 
     already_sorted = False
 
@@ -825,7 +827,7 @@ class DatasetDuckDB(Dataset):
           # If we are sorting by the topk of a signal column, we can utilize the vector store
           # via `signal.vector_compute_topk` and then use the topk to filter the dataframe. This
           # is much faster than computing the signal for all rows and then sorting.
-          if self._sorting_by_topk_of_signal(limit, sort_order, sort_cols_after_udf, signal_column):
+          if self._sorting_by_topk_of_signal(limit, sort_order, sort_udf_aliases, signal_column):
             already_sorted = True
             k = (limit or 0) + (offset or 0)
             topk = signal.vector_compute_topk(k, vector_store)
@@ -838,6 +840,9 @@ class DatasetDuckDB(Dataset):
               deep_array = df[signal_column]
               for key_part in key[:-1]:
                 deep_array = deep_array[key_part]
+              if isinstance(score, np.number):
+                # Unbox the numpy number to a python primitive.
+                score = score.item()
               deep_array[key[-1]] = score
           else:
             flat_keys = flatten_keys(df[UUID_COLUMN], input)
@@ -878,7 +883,7 @@ class DatasetDuckDB(Dataset):
 
           df[signal_column] = unflatten(signal_out, input)
 
-    if udf_filters or sort_cols_after_udf:
+    if udf_filters or (sort_sql_after_udf and not already_sorted):
       # Re-upload the udf outputs to duckdb so we can filter/sort on them.
       rel = con.from_df(df)
 
@@ -887,10 +892,10 @@ class DatasetDuckDB(Dataset):
         if udf_filter_queries:
           rel = rel.filter(' AND '.join(udf_filter_queries))
 
-      if not already_sorted and sort_cols_after_udf:
+      if not already_sorted and sort_sql_after_udf:
         if not sort_order:
           raise ValueError('`sort_order` is required when `sort_by` is specified.')
-        rel = rel.order(f'{", ".join(sort_cols_after_udf)} {sort_order.value}')
+        rel = rel.order(f'{", ".join(sort_sql_after_udf)} {sort_order.value}')
 
       if limit:
         rel = rel.limit(limit, offset or 0)
