@@ -1,6 +1,6 @@
 """NumpyVectorStore class for storing vectors in numpy arrays."""
 
-from typing import Iterable, Optional
+from typing import Iterable, Optional, cast
 
 import numpy as np
 import pandas as pd
@@ -9,15 +9,13 @@ from typing_extensions import override
 from ..schema import VectorKey
 from .vector_store import VectorStore
 
-NP_INDEX_KEYS_KWD = 'keys'
-NP_EMBEDDINGS_KWD = 'embeddings'
-
 
 class NumpyVectorStore(VectorStore):
   """Stores vectors as in-memory np arrays."""
   _embeddings: np.ndarray
   _keys: list[VectorKey]
-  _df: pd.DataFrame
+  # Maps a `VectorKey` to a row index in `_embeddings`.
+  _lookup: pd.Series
 
   @override
   def keys(self) -> list[VectorKey]:
@@ -37,12 +35,9 @@ class NumpyVectorStore(VectorStore):
     # than float64.
     self._embeddings = embeddings.astype(np.float32)
 
-    # Make str keys to index into the pandas dataframe.
-    str_keys = list(map(str, keys))
-    # np.split makes a shallow copy of each of the embeddings, so the data frame can be a shallow
-    # view of the numpy array. This means the dataframe cannot be used to modify the embeddings.
-    chunks = np.vsplit(self._embeddings, self._embeddings.shape[0])
-    self._df = pd.DataFrame({NP_EMBEDDINGS_KWD: chunks}, index=str_keys)
+    index = pd.MultiIndex.from_tuples(keys)
+    row_indices = np.arange(len(self._embeddings), dtype=np.uint32)
+    self._lookup = pd.Series(row_indices, index=index)
 
   @override
   def get(self, keys: Iterable[VectorKey]) -> np.ndarray:
@@ -54,20 +49,23 @@ class NumpyVectorStore(VectorStore):
     Returns
       The embeddings for the given keys.
     """
-    str_keys = list(map(str, keys))
-    return np.concatenate(self._df.loc[str_keys][NP_EMBEDDINGS_KWD], axis=0)
+    return self._embeddings.take(self._lookup.loc[keys], axis=0)
 
   @override
   def topk(self,
            query: np.ndarray,
            k: int,
-           keys: Optional[Iterable[VectorKey]] = None) -> list[tuple[VectorKey, float]]:
-    if keys:
-      embeddings = self.get(keys)
-      keys = list(keys)
+           key_prefixes: Optional[Iterable[VectorKey]] = None) -> list[tuple[VectorKey, float]]:
+    if key_prefixes is not None:
+      # Cast tuples of length 1 to the element itself to avoid a pandas bug.
+      key_prefixes = cast(
+        list[VectorKey],
+        [k[0] if isinstance(k, tuple) and len(k) == 1 else k for k in key_prefixes])
+      # This uses the hierarchical index (MutliIndex) to do a prefix lookup.
+      row_indices = self._lookup.loc[key_prefixes]
+      keys, embeddings = list(row_indices.index), self._embeddings.take(row_indices, axis=0)
     else:
-      embeddings = self._embeddings
-      keys = self._keys
+      keys, embeddings = self._keys, self._embeddings
 
     query = query.astype(embeddings.dtype)
     similarities: np.ndarray = np.dot(embeddings, query).reshape(-1)
