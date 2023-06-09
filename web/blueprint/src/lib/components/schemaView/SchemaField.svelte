@@ -1,7 +1,6 @@
 <script lang="ts">
   import {getDatasetContext} from '$lib/stores/datasetStore';
   import {getDatasetViewContext} from '$lib/stores/datasetViewStore';
-  import {isPathVisible} from '$lib/view_utils';
   import {
     PATH_WILDCARD,
     VALUE_KEY,
@@ -60,7 +59,7 @@
 
   let datasetStore = getDatasetContext();
 
-  $: isVisible = isPathVisible($datasetViewStore, $datasetStore, path);
+  $: isVisible = $datasetStore?.visibleFields?.some(f => pathIsEqual(f.path, path));
 
   $: isSortedBy = $datasetViewStore.queryOptions.sort_by?.some(p => pathIsEqual(p, alias || path));
   $: sortOrder = $datasetViewStore.queryOptions.sort_order;

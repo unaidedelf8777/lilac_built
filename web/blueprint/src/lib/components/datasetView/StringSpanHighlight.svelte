@@ -4,13 +4,7 @@
    * layer, meant to be rendered on top of the source text.
    */
   import {getDatasetContext} from '$lib/stores/datasetStore';
-  import {getDatasetViewContext} from '$lib/stores/datasetViewStore';
-  import {
-    isPathVisible,
-    mergeSpans,
-    type MergedSpan,
-    type SpanHoverNamedValue
-  } from '$lib/view_utils';
+  import {mergeSpans, type MergedSpan, type SpanHoverNamedValue} from '$lib/view_utils';
 
   import {
     L,
@@ -18,6 +12,7 @@
     getFieldsByDtype,
     getValueNodes,
     isConceptScoreSignal,
+    pathIsEqual,
     serializePath,
     valueAtPath,
     type LilacField,
@@ -36,8 +31,7 @@
 
   const spanHoverOpacity = 0.9;
 
-  let datasetViewStore = getDatasetViewContext();
-  let datasetStore = getDatasetContext();
+  const datasetStore = getDatasetContext();
 
   // Find the keyword span paths under this field.
   $: keywordSpanPaths = visibleKeywordSpanFields.map(f => serializePath(f.path));
@@ -47,7 +41,7 @@
     visibleSpanFields.map(f => [
       serializePath(f.path),
       getFieldsByDtype('float32', f).filter(f =>
-        isPathVisible($datasetViewStore, $datasetStore, f.path)
+        $datasetStore?.visibleFields?.some(visibleField => pathIsEqual(visibleField.path, f.path))
       )
     ])
   );
@@ -102,10 +96,12 @@
         for (const originalSpan of originalSpans) {
           for (const floatField of floatFields) {
             const subPath = floatField.path.slice(spanPath.length);
-            const value = L.value<'float32'>(valueAtPath(originalSpan as LilacValueNode, subPath));
-            if (value != null) {
-              maxScore = Math.max(maxScore, value);
-              fieldToValue[floatField.path.at(-1)!] = value;
+            const value = valueAtPath(originalSpan as LilacValueNode, subPath);
+            if (value == null) continue;
+            const floatValue = L.value<'float32'>(value);
+            if (floatValue != null) {
+              maxScore = Math.max(maxScore, floatValue);
+              fieldToValue[floatField.path.at(-1)!] = floatValue;
             }
           }
         }
