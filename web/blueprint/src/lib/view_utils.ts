@@ -1,4 +1,6 @@
 import {
+  L,
+  VALUE_KEY,
   childFields,
   deserializePath,
   getField,
@@ -6,8 +8,11 @@ import {
   pathIsEqual,
   serializePath,
   type DataType,
+  type DataTypeCasted,
   type LilacField,
   type LilacSelectRowsSchema,
+  type LilacValueNode,
+  type LilacValueNodeCasted,
   type Path,
   type Search,
   type SortResult
@@ -149,4 +154,150 @@ export function getDefaultSelectedPath(datasetStore: DatasetStore | null): Path 
 export function getSort(datasetStore: DatasetStore | null): SortResult | null {
   // NOTE: We currently only support sorting by a single column from the UI.
   return (datasetStore?.selectRowsSchema?.sorts || [])[0] || null;
+}
+
+export interface SpanHoverNamedValue {
+  name: string;
+  value: number;
+}
+
+export interface MergedSpan {
+  text: string;
+  span: DataTypeCasted<'string_span'>;
+  originalSpans: {[spanSet: string]: LilacValueNodeCasted<'string_span'>[]};
+  // The paths associated with this merged span.
+  paths: string[];
+}
+
+/**
+ * Merge a set of spans on a single item into a single list of spans, each with points back to
+ * the original spans.
+ *
+ * For example:
+ *   {
+ *     spans1: [(0, 2), (3, 4)]
+ *     spans2: [(0, 1), (2, 4)]
+ *   }
+ * Transforms into:
+ *   [
+ *     {span: (0, 1),  originalSpans: {spans1: [(0, 2)], spans2: [(0, 1)]}
+ *     {span: (1, 2),  originalSpans: {spans1: [(0, 2)]}}
+ *     {span: (2, 3),  originalSpans: {spans2: [(2, 4)]}}
+ *     {span: (3, 4),  originalSpans: {spans1: [(3, 4)], spans2: [(2, 4)]}
+ *  ]
+ */
+export function mergeSpans(
+  text: string,
+  inputSpanSets: {[spanSet: string]: LilacValueNodeCasted<'string_span'>[]}
+): MergedSpan[] {
+  const textLength = text.length;
+  // Maps a span set to the index of the spans we're currently processing for each span set.
+  // The size of this object is the size of the number of span sets we're computing over (small).
+  const spanSetIndices: {[spanSet: string]: number} = Object.fromEntries(
+    Object.keys(inputSpanSets).map(spanSet => [spanSet, 0])
+  );
+
+  // Sort spans by start index.
+  for (const spanSet of Object.keys(inputSpanSets)) {
+    inputSpanSets[spanSet].sort((a, b) => {
+      const aStart = a[VALUE_KEY]?.start || 0;
+      const bStart = b[VALUE_KEY]?.start || 0;
+      return aStart - bStart;
+    });
+  }
+
+  let curStartIdx = 0;
+  const mergedSpans: MergedSpan[] = [];
+  let spanSetWorkingSpans = Object.fromEntries(
+    Object.entries(spanSetIndices).map(([spanSet, spanId]) => [
+      spanSet,
+      // Include the next span as it may contribute to the end offset of this merged span.
+      [inputSpanSets[spanSet][spanId], inputSpanSets[spanSet][spanId + 1]]
+    ])
+  );
+
+  while (curStartIdx < text.length) {
+    // Compute the next end index.
+    let curEndIndex = textLength;
+    for (const spans of Object.values(spanSetWorkingSpans)) {
+      for (const span of spans) {
+        const spanValue = (span || {})[VALUE_KEY];
+        if (spanValue == null) continue;
+        if (spanValue.start < curEndIndex && spanValue.start > curStartIdx) {
+          curEndIndex = spanValue.start;
+        }
+        if (spanValue.end < curEndIndex && spanValue.end > curStartIdx) {
+          curEndIndex = spanValue.end;
+        }
+      }
+    }
+
+    // Filter the spans that meet the range.
+    const spansInRange = Object.fromEntries(
+      Object.entries(spanSetWorkingSpans).map(([spanSet, spans]) => [
+        spanSet,
+        spans.filter(span => {
+          return (
+            span != null &&
+            span[VALUE_KEY] != null &&
+            span[VALUE_KEY].start < curEndIndex &&
+            span[VALUE_KEY].end > curStartIdx
+          );
+        })
+      ])
+    );
+    // Sparsify the keys.
+    for (const spanSet of Object.keys(spansInRange)) {
+      if (spansInRange[spanSet].length === 0) {
+        delete spansInRange[spanSet];
+      }
+    }
+
+    const paths = Object.values(spansInRange)
+      .flat()
+      .map(span => L.path(span as LilacValueNode))
+      .map(path => serializePath(path!));
+
+    mergedSpans.push({
+      text: text.slice(curStartIdx, curEndIndex),
+      span: {start: curStartIdx, end: curEndIndex},
+      originalSpans: spansInRange,
+      paths
+    });
+
+    // Advance the spans that have the span end index.
+    for (const spanSet of Object.keys(spanSetIndices)) {
+      const spanSetIdx = spanSetIndices[spanSet];
+      const span = (spanSetWorkingSpans[spanSet][0] || {})[VALUE_KEY];
+      if (span == null || spanSetIdx == null) continue;
+      if (span.end <= curEndIndex) {
+        if (spanSetIdx > inputSpanSets[spanSet].length) {
+          delete spanSetIndices[spanSet];
+          continue;
+        }
+        spanSetIndices[spanSet]++;
+      }
+    }
+
+    curStartIdx = curEndIndex;
+    spanSetWorkingSpans = Object.fromEntries(
+      Object.entries(spanSetIndices).map(([spanSet, spanId]) => [
+        spanSet,
+        // Include the next span as it may contribute to the end offset of this merged span.
+        [inputSpanSets[spanSet][spanId], inputSpanSets[spanSet][spanId + 1]]
+      ])
+    );
+  }
+
+  // If the text has more characters than spans, emit a final empty span.
+  if (curStartIdx < text.length) {
+    mergedSpans.push({
+      text: text.slice(curStartIdx, text.length),
+      span: {start: curStartIdx, end: text.length},
+      originalSpans: {},
+      paths: []
+    });
+  }
+
+  return mergedSpans;
 }

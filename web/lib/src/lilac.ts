@@ -19,8 +19,8 @@ import {
   type Path
 } from './schema';
 
-const PATH_KEY = '__path__';
-const SCHEMA_FIELD_KEY = '__field__';
+export const PATH_KEY = '__path__';
+export const SCHEMA_FIELD_KEY = '__field__';
 // The search type is not an explicitly exported type so we extract the type from the different
 // search types automatically for type-safety.
 export type SearchType = Exclude<Search['query']['type'], undefined>;
@@ -50,14 +50,27 @@ export type LilacValueNode = {
 /**
  * Internal type for a LilacValueNode casted with internal properties.
  */
-type LilacValueNodeCasted<D extends DataType = DataType> = {
+export type LilacValueNodeCasted<D extends DataType = DataType> = {
   /** Holds the actual value of the node */
   [VALUE_KEY]: DataTypeCasted<D>;
   /** Holds the path property of the node */
   [PATH_KEY]: Path;
   /** Holds a reference to the schema field */
-  [SCHEMA_FIELD_KEY]: LilacField | undefined;
+  [SCHEMA_FIELD_KEY]?: LilacField | undefined;
+  [metadata: string]: unknown;
 };
+
+export function valueAtPath(item: LilacValueNode, path: Path): LilacValueNode {
+  if (item == null) throw Error('Item is null.');
+  if (path.length === 0) {
+    return item;
+  }
+  const [key, ...rest] = path;
+  if (item[key] == null) {
+    throw Error('Item at path does not exist');
+  }
+  return valueAtPath(item[key], rest);
+}
 
 /**
  * Cast a value node to an internal value node
@@ -133,7 +146,6 @@ export function getFieldsByDtype(dtype: DataType, schema?: LilacSchema): LilacFi
 /** List all values as a flattend array */
 export function listValueNodes(row: LilacValueNode): LilacValueNode[] {
   // Return the cached value if it exists.
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
   if (listValueNodesCache.has(row)) return listValueNodesCache.get(row)!;
 
   let result: LilacValueNode[];
