@@ -80,7 +80,7 @@ export function getSearchPath(
     return deserializePath(store.searchPath);
 
   // Without explicit selection, choose the default string path.
-  return getDefaultSelectedPath(datasetStore);
+  return getDefaultSearchPath(datasetStore);
 }
 
 export function getSearchEmbedding(
@@ -145,10 +145,19 @@ export function getSearches(store: IDatasetViewStore, path?: Path | null): Searc
   return (store.queryOptions.searches || []).filter(s => pathIsEqual(s.path, path));
 }
 
-export function getDefaultSelectedPath(datasetStore: DatasetStore | null): Path | null {
-  // The longest path is auto-selected.
-  if (datasetStore?.stats != null && datasetStore?.stats.length > 0) {
-    return datasetStore?.stats[0].path;
+function getDefaultSearchPath(datasetStore: DatasetStore | null): Path | null {
+  if (datasetStore?.stats == null || datasetStore.stats.length === 0) {
+    return null;
+  }
+  const visibleStringPaths = (datasetStore.visibleFields || [])
+    .filter(f => f.dtype === 'string')
+    .map(f => serializePath(f.path));
+  // The longest visible path is auto-selected.
+  for (const stat of datasetStore.stats) {
+    const stringPath = serializePath(stat.path);
+    if (visibleStringPaths.indexOf(stringPath) >= 0) {
+      return stat.path;
+    }
   }
   return null;
 }
