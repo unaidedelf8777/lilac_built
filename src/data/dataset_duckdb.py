@@ -25,6 +25,7 @@ from ..schema import (
   TEXT_SPAN_START_FEATURE,
   UUID_COLUMN,
   VALUE_KEY,
+  Bin,
   DataType,
   Field,
   Item,
@@ -58,7 +59,6 @@ from ..utils import DebugTimer, get_dataset_output_dir, log, open_file
 from . import dataset
 from .dataset import (
   BinaryOp,
-  Bins,
   Column,
   ColumnId,
   Dataset,
@@ -71,7 +71,6 @@ from .dataset import (
   GroupsSortBy,
   ListOp,
   MediaResult,
-  NamedBins,
   Search,
   SearchResultInfo,
   SelectGroupsResult,
@@ -569,13 +568,14 @@ class DatasetDuckDB(Dataset):
     return result
 
   @override
-  def select_groups(self,
-                    leaf_path: Path,
-                    filters: Optional[Sequence[FilterLike]] = None,
-                    sort_by: Optional[GroupsSortBy] = GroupsSortBy.COUNT,
-                    sort_order: Optional[SortOrder] = SortOrder.DESC,
-                    limit: Optional[int] = None,
-                    bins: Optional[Bins] = None) -> SelectGroupsResult:
+  def select_groups(
+      self,
+      leaf_path: Path,
+      filters: Optional[Sequence[FilterLike]] = None,
+      sort_by: Optional[GroupsSortBy] = GroupsSortBy.COUNT,
+      sort_order: Optional[SortOrder] = SortOrder.DESC,
+      limit: Optional[int] = None,
+      bins: Optional[Union[Sequence[Bin], Sequence[float]]] = None) -> SelectGroupsResult:
     if not leaf_path:
       raise ValueError('leaf_path must be provided')
     path = normalize_path(leaf_path)
@@ -591,35 +591,45 @@ class DatasetDuckDB(Dataset):
     inner_val = 'inner_val'
     outer_select = inner_val
     if is_float(leaf.dtype) or is_integer(leaf.dtype):
+      bins = bins or leaf.bins
       if bins is None:
         raise ValueError(f'"bins" needs to be defined for the int/float leaf "{path}"')
-      # Normalize the bins to be `NamedBins`.
-      named_bins = bins if isinstance(bins, NamedBins) else NamedBins(bins=bins)
-      bounds = []
-      # Normalize the bins to be in the form of (label, bound).
+      # Normalize the bins to be `list[Bin]`.
+      named_bins = _normalize_bins(bins)
 
-      for i in range(len(named_bins.bins) + 1):
-        prev = named_bins.bins[i - 1] if i > 0 else "'-Infinity'"
-        next = named_bins.bins[i] if i < len(named_bins.bins) else "'Infinity'"
-        label = f"'{named_bins.labels[i]}'" if named_bins.labels else i
-        bounds.append(f'({label}, {prev}, {next})')
+      sql_bounds = []
+      for label, start, end in named_bins:
+        if start is None:
+          start = cast(float, "'-Infinity'")
+        if end is None:
+          end = cast(float, "'Infinity'")
+        sql_bounds.append(f"('{label}', {start}, {end})")
+
       bin_index_col = 'col0'
       bin_min_col = 'col1'
       bin_max_col = 'col2'
       # We cast the field to `double` so bining works for both `float` and `int` fields.
       outer_select = f"""(
         SELECT {bin_index_col} FROM (
-          VALUES {', '.join(bounds)}
+          VALUES {', '.join(sql_bounds)}
         ) WHERE {inner_val}::DOUBLE >= {bin_min_col} AND {inner_val}::DOUBLE < {bin_max_col}
       )"""
     count_column = 'count'
     value_column = 'value'
 
     limit_query = f'LIMIT {limit}' if limit else ''
-    inner_select = _select_sql(path, flatten=True, unnest=True)
+    duckdb_path = self._leaf_path_to_duckdb_path(path, manifest.data_schema)
+    inner_select = _select_sql(duckdb_path, flatten=True, unnest=True)
+
+    filters, _ = self._normalize_filters(filters, col_aliases={}, udf_aliases={}, manifest=manifest)
+    filter_queries = self._create_where(manifest, filters, searches=[])
+    where_query = ''
+    if filter_queries:
+      where_query = f"WHERE {' AND '.join(filter_queries)}"
+
     query = f"""
       SELECT {outer_select} AS {value_column}, COUNT() AS {count_column}
-      FROM (SELECT {inner_select} AS {inner_val} FROM t)
+      FROM (SELECT {inner_select} AS {inner_val} FROM t {where_query})
       GROUP BY {value_column}
       ORDER BY {sort_by} {sort_order}
       {limit_query}
@@ -1609,3 +1619,14 @@ def _schema_has_spans(field: Field) -> bool:
   if field.repeated_field:
     return _schema_has_spans(field.repeated_field)
   return False
+
+
+def _normalize_bins(bins: Union[Sequence[Bin], Sequence[float]]) -> list[Bin]:
+  if not isinstance(bins[0], (float, int)):
+    return cast(list[Bin], bins)
+  named_bins: list[Bin] = []
+  for i in range(len(bins) + 1):
+    start = cast(float, bins[i - 1]) if i > 0 else None
+    end = cast(float, bins[i]) if i < len(bins) else None
+    named_bins.append((str(i), start, end))
+  return named_bins
