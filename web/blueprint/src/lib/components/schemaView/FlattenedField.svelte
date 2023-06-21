@@ -12,6 +12,7 @@
   import SchemaFieldMenu from '../contextMenu/SchemaFieldMenu.svelte';
   import EmbeddingBadge from '../datasetView/EmbeddingBadge.svelte';
   import SearchPill from '../datasetView/SearchPill.svelte';
+  import SignalBadge from '../datasetView/SignalBadge.svelte';
   import FieldDetails from './FieldDetails.svelte';
 
   export let schema: Lilac.LilacSchema;
@@ -90,6 +91,7 @@
           if (c.signal?.signal_name === 'sentences') return false;
           if (c.signal?.signal_name === 'substring_search') return false;
           if (c.signal?.signal_name === 'semantic_similarity') return false;
+          if (c.signal?.signal_name === 'concept_labels') return false;
 
           return true;
         })
@@ -209,9 +211,8 @@
         </HoverTooltip>
       </Tag>
     </div>
-    <Tag
-      interactive
-      type="green"
+    <SignalBadge
+      isPreview
       on:click={() =>
         field.signal &&
         isPreview &&
@@ -223,11 +224,9 @@
           signalName: field.signal?.signal_name,
           value: field.signal
         })}
-    >
-      Preview
-    </Tag>
+    />
   {:else if Lilac.isSignalRootField(field)}
-    <Tag type="blue" class="signal-tag whitespace-nowrap">Signal</Tag>
+    <SignalBadge />
   {/if}
   {#if Lilac.isSortableField(field) && !isPreview}
     <div class="flex">
