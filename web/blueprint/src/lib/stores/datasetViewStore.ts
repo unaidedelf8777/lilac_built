@@ -3,12 +3,15 @@ import {
   pathIncludes,
   pathIsEqual,
   serializePath,
+  type BinaryFilter,
   type Column,
   type LilacSelectRowsSchema,
+  type ListFilter,
   type Path,
   type Search,
   type SelectRowsOptions,
-  type SortOrder
+  type SortOrder,
+  type UnaryFilter
 } from '$lilac';
 import deepEqual from 'deep-equal';
 import {getContext, hasContext, setContext} from 'svelte';
@@ -27,6 +30,7 @@ export interface IDatasetViewStore {
 
   // Explicit user-selected columns.
   selectedColumns: {[path: string]: boolean};
+  expandedColumns: {[path: string]: boolean};
   queryOptions: SelectRowsOptions;
 
   // Search.
@@ -53,6 +57,7 @@ export const createDatasetViewStore = (namespace: string, datasetName: string) =
     searchPath: null,
     searchEmbedding: null,
     selectedColumns: {},
+    expandedColumns: {},
     queryOptions: {
       // Add * as default field when supported here
       columns: [],
@@ -93,7 +98,18 @@ export const createDatasetViewStore = (namespace: string, datasetName: string) =
         }
         return state;
       }),
-
+    addExpandedColumn(path: Path) {
+      update(state => {
+        state.expandedColumns[serializePath(path)] = true;
+        return state;
+      });
+    },
+    removeExpandedColumn(path: Path) {
+      update(state => {
+        state.expandedColumns[serializePath(path)] = false;
+        return state;
+      });
+    },
     addUdfColumn: (column: Column) =>
       update(state => {
         state.queryOptions.columns?.push(column);
@@ -192,12 +208,16 @@ export const createDatasetViewStore = (namespace: string, datasetName: string) =
         state.queryOptions.sort_order = sortOrder || undefined;
         return state;
       }),
-
-    removeFilters: (column: Path) =>
+    removeFilter: (removedFilter: BinaryFilter | UnaryFilter | ListFilter) =>
       update(state => {
         state.queryOptions.filters = state.queryOptions.filters?.filter(
-          c => !pathIsEqual(c.path, column)
+          f => !deepEqual(f, removedFilter)
         );
+        return state;
+      }),
+    addFilter: (filter: BinaryFilter | UnaryFilter | ListFilter) =>
+      update(state => {
+        state.queryOptions.filters = [...(state.queryOptions.filters || []), filter];
         return state;
       })
   };

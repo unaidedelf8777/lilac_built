@@ -1,8 +1,10 @@
 <script lang="ts">
   import {queryDatasetStats, querySelectGroups} from '$lib/queries/datasetQueries';
   import {getDatasetViewContext} from '$lib/stores/datasetViewStore';
-  import {formatValue, type LeafValue, type LilacField} from '$lilac';
+  import {formatValue, type BinaryFilter, type LeafValue, type LilacField} from '$lilac';
   import {SkeletonText} from 'carbon-components-svelte';
+  import {Information} from 'carbon-icons-svelte';
+  import {hoverTooltip} from '../common/HoverTooltip';
   import Histogram from './Histogram.svelte';
 
   export let field: LilacField;
@@ -10,7 +12,10 @@
   const store = getDatasetViewContext();
 
   $: statsQuery = queryDatasetStats($store.namespace, $store.datasetName, {leaf_path: field.path});
-  $: groupsQuery = querySelectGroups($store.namespace, $store.datasetName, {leaf_path: field.path});
+  $: groupsQuery = querySelectGroups($store.namespace, $store.datasetName, {
+    leaf_path: field.path,
+    filters: $store.queryOptions.filters
+  });
 
   $: counts =
     $groupsQuery.data != null ? ($groupsQuery.data.counts as [LeafValue, number][]) : null;
@@ -20,6 +25,24 @@
     $groupsQuery.data != null
       ? ($groupsQuery.data.bins as [string, number | null, number | null][])
       : null;
+
+  function rowClicked(value: LeafValue, index: number) {
+    if (value == null) return;
+    if (bins != null) {
+      const [, min, max] = bins[index];
+      if (min != null) {
+        const filter: BinaryFilter = {path: field.path, op: 'greater_equal', value: min};
+        store.addFilter(filter);
+      }
+      if (max != null) {
+        const filter: BinaryFilter = {path: field.path, op: 'less', value: max};
+        store.addFilter(filter);
+      }
+      return;
+    }
+    const filter: BinaryFilter = {path: field.path, op: 'equals', value};
+    store.addFilter(filter);
+  }
 </script>
 
 <div class="p-4">
@@ -29,25 +52,47 @@
     <!-- Loading... -->
     <SkeletonText paragraph width="50%" />
   {:else}
-    <table class="stats-table mb-4">
+    <table class="stats-table">
       <tbody>
         <tr>
-          <td>Total count</td>
+          <td>
+            <span>Total count</span>
+            <span use:hoverTooltip={{text: 'Total number of rows where the value is defined'}}>
+              <Information class="inline" />
+            </span>
+          </td>
           <td>{formatValue(stats.total_count)}</td>
         </tr>
         <tr>
-          <td>Distinct count (approx.)</td>
+          <td>
+            <span>Distinct count (approx.)</span>
+            <span
+              use:hoverTooltip={{text: 'An approximation of the total number of unique values'}}
+            >
+              <Information class="inline" />
+            </span>
+          </td>
           <td>{formatValue(stats.approx_count_distinct)}</td>
         </tr>
         {#if stats.avg_text_length}
           <tr>
-            <td>Avg. text length</td>
+            <td>
+              <span>Avg. text length</span>
+              <span use:hoverTooltip={{text: 'The average length of the text'}}>
+                <Information class="inline" />
+              </span>
+            </td>
             <td>{stats.avg_text_length}</td>
           </tr>
         {/if}
         {#if stats.min_val && stats.max_val}
           <tr>
-            <td>Range</td>
+            <td>
+              <span>Range</span>
+              <span use:hoverTooltip={{text: 'The minimum and maximum value across the dataset'}}>
+                <Information class="inline" />
+              </span>
+            </td>
             <td>{formatValue(stats.min_val)} .. {formatValue(stats.max_val)}</td>
           </tr>
         {/if}
@@ -60,8 +105,15 @@
   {:else if counts == null}
     <!-- Loading... -->
     <SkeletonText paragraph width="50%" />
-  {:else}
-    <Histogram {counts} {bins} {field} />
+  {:else if counts.length > 0}
+    <div class="mt-4">
+      <Histogram
+        {counts}
+        {bins}
+        {field}
+        on:row-click={e => rowClicked(e.detail.value, e.detail.index)}
+      />
+    </div>
   {/if}
 </div>
 
