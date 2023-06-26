@@ -8,6 +8,7 @@
     PATH_WILDCARD,
     VALUE_KEY,
     childFields,
+    isFilterableField,
     isSignalField,
     isSignalRootField,
     isSortableField,
@@ -18,7 +19,7 @@
     type LilacSchema,
     type TextEmbeddingSignal
   } from '$lilac';
-  import {Button, Checkbox, Tag} from 'carbon-components-svelte';
+  import {Button, Checkbox, OverflowMenu, Tag} from 'carbon-components-svelte';
   import {
     AssemblyCluster,
     Boolean,
@@ -138,6 +139,8 @@
   }
 
   $: isPreview = isPreviewSignal($datasetStore.selectRowsSchema?.data || null, path);
+
+  $: hasMenu = !isPreview && (isSortableField(field) || isFilterableField(field) || !isSignal);
 
   $: searches = getSearches($datasetViewStore, path);
 
@@ -280,7 +283,11 @@
         />
       </div>
     {/if}
-    <SchemaFieldMenu {field} {schema} />
+    {#if hasMenu}
+      <OverflowMenu light flipped>
+        <SchemaFieldMenu {field} {schema} />
+      </OverflowMenu>
+    {/if}
   </div>
 
   {#if expandedDetails}

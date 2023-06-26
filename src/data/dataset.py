@@ -258,24 +258,15 @@ class Dataset(abc.ABC):
   @abc.abstractmethod
   def compute_signal(self,
                      signal: Signal,
-                     leaf_path: Path,
+                     column: ColumnId,
                      task_step_id: Optional[TaskStepId] = None) -> None:
     """Compute a signal for a column.
 
     Args:
       signal: The signal to compute over the given columns.
-      leaf_path: The leaf path to compute the signal on.
+      column: The column to compute the signal on.
       task_step_id: The TaskManager `task_step_id` for this process run. This is used to update the
         progress of the task.
-    """
-    pass
-
-  @abc.abstractmethod
-  def delete_signal(self, signal_path: Path) -> None:
-    """Delete a computed signal from the dataset.
-
-    Args:
-      signal_path: The path holding the computed data of the signal.
     """
     pass
 
