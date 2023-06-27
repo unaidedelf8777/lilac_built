@@ -2,11 +2,15 @@
   import {goto} from '$app/navigation';
   import Commands, {Command, triggerCommand} from '$lib/components/commands/Commands.svelte';
   import ConceptView from '$lib/components/concepts/ConceptView.svelte';
-  import {queryConcept, queryConcepts} from '$lib/queries/conceptQueries';
+  import {deleteConceptMutation, queryConcept, queryConcepts} from '$lib/queries/conceptQueries';
+  import {datasetStores} from '$lib/stores/datasetStore';
+  import {datasetViewStores} from '$lib/stores/datasetViewStore';
   import {urlHash} from '$lib/stores/urlHashStore';
   import {conceptLink} from '$lib/utils';
-  import {SkeletonText} from 'carbon-components-svelte';
+  import {Modal, SkeletonText} from 'carbon-components-svelte';
+  import {InProgress, TrashCan} from 'carbon-icons-svelte';
   import AddAlt from 'carbon-icons-svelte/lib/AddAlt.svelte';
+  import {get} from 'svelte/store';
 
   let namespace: string | undefined;
   let conceptName: string | undefined;
@@ -16,9 +20,28 @@
     conceptName = ctx.conceptName;
   });
 
+  let deleteConceptInfo: {namespace: string; name: string} | null = null;
+
   const concepts = queryConcepts();
+  const deleteConcept = deleteConceptMutation();
 
   $: concept = namespace && conceptName ? queryConcept(namespace, conceptName) : undefined;
+
+  function deleteConceptClicked() {
+    if (deleteConceptInfo == null) {
+      return;
+    }
+    const {namespace, name} = deleteConceptInfo;
+    $deleteConcept.mutate([{namespace, name}], {
+      onSuccess: () => {
+        for (const [datasetKey, store] of Object.entries(datasetViewStores)) {
+          const selectRowsSchema = get(datasetStores[datasetKey]).selectRowsSchema?.data;
+          store.deleteConcept(namespace, name, selectRowsSchema);
+        }
+        deleteConceptInfo = null;
+      }
+    });
+  }
 </script>
 
 <div class="flex h-full w-full">
@@ -27,14 +50,24 @@
       <SkeletonText />
     {:else if $concepts.isSuccess}
       {#each $concepts.data as c}
-        <a
-          href={conceptLink(c.namespace, c.name)}
-          class="flex w-full flex-row items-center whitespace-pre border-b border-gray-200 px-4 py-2 hover:bg-gray-100"
+        <div
+          class="flex justify-between border-b border-gray-200 hover:bg-gray-100"
           class:bg-blue-100={c.name === conceptName}
-          class:hover:bg-blue-100={c.name === conceptName}
         >
-          <span class="opacity-50">{c.namespace} / </span><span> {c.name}</span>
-        </a>
+          <a
+            href={conceptLink(c.namespace, c.name)}
+            class="flex w-full flex-row items-center whitespace-pre px-4 py-2"
+          >
+            <span class="opacity-50">{c.namespace} / </span><span> {c.name}</span>
+          </a>
+          <button
+            title="Remove concept"
+            class="p-3 opacity-50 hover:text-red-400 hover:opacity-100"
+            on:click={() => (deleteConceptInfo = {namespace: c.namespace, name: c.name})}
+          >
+            <TrashCan size={16} />
+          </button>
+        </div>
       {/each}
 
       <button
@@ -60,3 +93,22 @@
 </div>
 
 <Commands />
+
+{#if deleteConceptInfo}
+  <Modal
+    danger
+    open
+    modalHeading="Delete concept"
+    primaryButtonText="Delete"
+    primaryButtonIcon={$deleteConcept.isLoading ? InProgress : undefined}
+    secondaryButtonText="Cancel"
+    on:click:button--secondary={() => (deleteConceptInfo = null)}
+    on:close={() => (deleteConceptInfo = null)}
+    on:submit={() => deleteConceptClicked()}
+  >
+    <p class="!text-lg">
+      Confirm deleting <code>{deleteConceptInfo.namespace}/{deleteConceptInfo.name}</code> ?
+    </p>
+    <p class="mt-2">This is a permanent action and cannot be undone.</p>
+  </Modal>
+{/if}
