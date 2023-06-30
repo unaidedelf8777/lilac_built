@@ -1,11 +1,18 @@
-import type {SpanHoverNamedValue} from '$lib/view_utils';
 import type {SvelteComponent} from 'svelte';
-import SpanHoverTooltip from './SpanHoverTooltip.svelte';
+import SpanHoverTooltip, {type SpanHoverNamedValue} from './SpanHoverTooltip.svelte';
 
-export function spanHover(element: HTMLSpanElement, namedValues: SpanHoverNamedValue[]) {
+export interface SpanHoverInfo {
+  namedValues: SpanHoverNamedValue[];
+  isHovered: boolean;
+}
+export function spanHover(element: HTMLSpanElement, spanHoverInfo: SpanHoverInfo) {
   let tooltipComponent: SvelteComponent | undefined;
-  let curNamedValues = namedValues;
-  function mouseOver() {
+  let curSpanHoverInfo = spanHoverInfo;
+  showSpan();
+  function showSpan() {
+    if (!curSpanHoverInfo.isHovered) {
+      return;
+    }
     const boundingRect = element.getBoundingClientRect();
     const style = window.getComputedStyle(element);
     const lineHeight = parseInt(style.getPropertyValue('line-height'));
@@ -17,7 +24,7 @@ export function spanHover(element: HTMLSpanElement, namedValues: SpanHoverNamedV
 
     tooltipComponent = new SpanHoverTooltip({
       props: {
-        namedValues: curNamedValues,
+        namedValues: curSpanHoverInfo.namedValues,
         x,
         y: boundingRect.top
       },
@@ -25,23 +32,24 @@ export function spanHover(element: HTMLSpanElement, namedValues: SpanHoverNamedV
     });
   }
 
-  function mouseLeave() {
+  function destroyHoverElement() {
     tooltipComponent?.$destroy();
     tooltipComponent = undefined;
   }
 
-  element.addEventListener('mouseover', mouseOver);
-  element.addEventListener('mouseleave', mouseLeave);
-
   return {
-    update(namedValues: SpanHoverNamedValue[]) {
-      curNamedValues = namedValues;
-      tooltipComponent?.$set({namedValues});
+    update(spanHoverInfo: SpanHoverInfo) {
+      curSpanHoverInfo = spanHoverInfo;
+
+      if (!spanHoverInfo.isHovered) {
+        destroyHoverElement();
+      } else {
+        showSpan();
+      }
+      tooltipComponent?.$set({namedValues: curSpanHoverInfo.namedValues});
     },
     destroy() {
-      mouseLeave();
-      element.removeEventListener('mouseover', mouseOver);
-      element.removeEventListener('mouseleave', mouseLeave);
+      destroyHoverElement();
     }
   };
 }
