@@ -2,10 +2,16 @@
 /* tslint:disable */
 /* eslint-disable */
 
+import type { OverallScore } from './OverallScore';
+
 /**
  * Metrics for a concept.
  */
 export type ConceptMetrics = {
-    avg_roc_auc: number;
+    f1: number;
+    precision: number;
+    recall: number;
+    roc_auc: number;
+    overall: OverallScore;
 };
 

@@ -1,25 +1,32 @@
 """Defines the concept and the concept models."""
 import dataclasses
 import random
-from typing import Iterable, Literal, Optional, Union
+from enum import Enum
+from typing import Callable, Iterable, Literal, Optional, Union
 
 import numpy as np
+from joblib import Parallel, delayed
 from pydantic import BaseModel, validator
+from sklearn.base import BaseEstimator, clone
 from sklearn.exceptions import NotFittedError
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import KFold, cross_val_score
+from sklearn.metrics import f1_score, precision_score, recall_score, roc_auc_score
+from sklearn.model_selection import KFold
 
 from ..db_manager import get_dataset
 from ..embeddings.embedding import get_embed_fn
 from ..schema import Path, RichData, SignalInputType, normalize_path
-from ..signals.signal import TextEmbeddingSignal, get_signal_cls
+from ..signals.signal import EMBEDDING_KEY, TextEmbeddingSignal, get_signal_cls
 from ..utils import DebugTimer
 
 LOCAL_CONCEPT_NAMESPACE = 'local'
 
 # Number of randomly sampled negative examples to use for training. This is used to obtain a more
 # balanced model that works with a specific dataset.
-DEFAULT_NUM_NEG_EXAMPLES = 300
+DEFAULT_NUM_NEG_EXAMPLES = 100
+
+# The maximum number of cross-validation models to train.
+MAX_NUM_CROSS_VAL_MODELS = 30
 
 
 class ConceptColumnInfo(BaseModel):
@@ -30,6 +37,13 @@ class ConceptColumnInfo(BaseModel):
   name: str
   # Path holding the text to use for negative examples.
   path: Path
+
+  @validator('path')
+  def _path_points_to_text_field(cls, path: Path) -> Path:
+    if path[-1] == EMBEDDING_KEY:
+      raise ValueError(
+        f'The path should point to the text field, not its embedding field. Provided path: {path}')
+    return path
 
   num_negative_examples = DEFAULT_NUM_NEG_EXAMPLES
 
@@ -92,10 +106,35 @@ class Concept(BaseModel):
     return list(sorted(drafts))
 
 
+class OverallScore(str, Enum):
+  """Enum holding the overall score."""
+  NOT_GOOD = 'not_good'
+  OK = 'ok'
+  GOOD = 'good'
+  VERY_GOOD = 'very_good'
+  GREAT = 'great'
+
+
+def _get_overall_score(f1_score: float) -> OverallScore:
+  if f1_score < 0.5:
+    return OverallScore.NOT_GOOD
+  if f1_score < 0.8:
+    return OverallScore.OK
+  if f1_score < 0.9:
+    return OverallScore.GOOD
+  if f1_score < 0.95:
+    return OverallScore.VERY_GOOD
+  return OverallScore.GREAT
+
+
 class ConceptMetrics(BaseModel):
   """Metrics for a concept."""
-  # The average ROC AUC for the concept.
-  avg_roc_auc: float
+  # The average F1 score for the concept computed using cross validation.
+  f1: float
+  precision: float
+  recall: float
+  roc_auc: float
+  overall: OverallScore
 
 
 @dataclasses.dataclass
@@ -104,10 +143,10 @@ class LogisticEmbeddingModel:
 
   version: int = -1
 
-  # The following fields are excluded from JSON serialization, but still pickleable.
-  # See `notebooks/Toxicity.ipynb` for an example of training a concept model.
-  _model: LogisticRegression = LogisticRegression(
-    class_weight=None, C=30, tol=1e-5, warm_start=True, max_iter=1_000, n_jobs=-1)
+  def __post_init__(self) -> None:
+    # See `notebooks/Toxicity.ipynb` for an example of training a concept model.
+    self._model = LogisticRegression(
+      class_weight=None, C=30, tol=1e-5, warm_start=True, max_iter=1_000, n_jobs=-1)
 
   def score_embeddings(self, embeddings: np.ndarray) -> np.ndarray:
     """Get the scores for the provided embeddings."""
@@ -116,24 +155,77 @@ class LogisticEmbeddingModel:
     except NotFittedError:
       return np.random.rand(len(embeddings))
 
-  def fit(self, embeddings: np.ndarray, labels: list[bool], sample_weights: list[float]) -> None:
+  def _setup_training(
+      self, X_train: np.ndarray, y_train: list[bool],
+      implicit_negatives: Optional[np.ndarray]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    num_pos_labels = len([y for y in y_train if y])
+    num_neg_labels = len([y for y in y_train if not y])
+    sample_weights = [(1.0 / num_pos_labels if y else 1.0 / num_neg_labels) for y in y_train]
+
+    if implicit_negatives is not None:
+      num_implicit_labels = len(implicit_negatives)
+      implicit_labels = [False] * num_implicit_labels
+      X_train = np.concatenate([implicit_negatives, X_train])
+      y_train = np.concatenate([implicit_labels, y_train])
+      sample_weights = [1.0 / num_implicit_labels] * num_implicit_labels + sample_weights
+
+    # Normalize sample weights to sum to the number of training examples.
+    weights = np.array(sample_weights)
+    weights *= (X_train.shape[0] / np.sum(weights))
+    return X_train, np.array(y_train), weights
+
+  def fit(self, embeddings: np.ndarray, labels: list[bool],
+          implicit_negatives: Optional[np.ndarray]) -> None:
     """Fit the model to the provided embeddings and labels."""
-    if len(set(labels)) < 2:
+    label_set = set(labels)
+    if implicit_negatives is not None:
+      label_set.add(False)
+    if len(label_set) < 2:
       return
     if len(labels) != len(embeddings):
       raise ValueError(
         f'Length of embeddings ({len(embeddings)}) must match length of labels ({len(labels)})')
-    if len(sample_weights) != len(labels):
-      raise ValueError(
-        f'Length of sample_weights ({len(sample_weights)}) must match length of labels '
-        f'({len(labels)})')
-    self._model.fit(embeddings, labels, sample_weights)
+    X_train, y_train, sample_weights = self._setup_training(embeddings, labels, implicit_negatives)
+    self._model.fit(X_train, y_train, sample_weights)
 
-  def compute_metrics(self, embeddings: np.ndarray, labels: list[bool]) -> ConceptMetrics:
+  def compute_metrics(self, embeddings: np.ndarray, labels: list[bool],
+                      implicit_negatives: Optional[np.ndarray]) -> ConceptMetrics:
     """Return the concept metrics."""
-    fold = KFold(n_splits=5, shuffle=True, random_state=42)
-    scores = cross_val_score(self._model, embeddings, labels, scoring='roc_auc', cv=fold, n_jobs=-1)
-    return ConceptMetrics(avg_roc_auc=np.mean(scores))
+    labels = np.array(labels)
+    n_splits = min(len(labels), MAX_NUM_CROSS_VAL_MODELS)
+    fold = KFold(n_splits, shuffle=True, random_state=42)
+
+    def _fit_and_score(model: BaseEstimator, X_train: np.ndarray, y_train: np.ndarray,
+                       sample_weights: np.ndarray, X_test: np.ndarray,
+                       y_test: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+      model.fit(X_train, y_train, sample_weights)
+      y_pred = model.predict_proba(X_test)[:, 1]
+      return y_test, y_pred
+
+    # Compute the metrics for each validation fold in parallel.
+    jobs: list[Callable] = []
+    for (train_index, test_index) in fold.split(embeddings):
+      X_train, y_train = embeddings[train_index], labels[train_index]
+      X_train, y_train, sample_weights = self._setup_training(X_train, y_train, implicit_negatives)
+      X_test, y_test = embeddings[test_index], labels[test_index]
+      model = clone(self._model)
+      jobs.append(delayed(_fit_and_score)(model, X_train, y_train, sample_weights, X_test, y_test))
+    results = Parallel(n_jobs=-1)(jobs)
+
+    y_test = np.concatenate([y_test for y_test, _ in results], axis=0)
+    y_pred = np.concatenate([y_pred for _, y_pred in results], axis=0)
+    y_pred_binary = y_pred >= 0.5
+    f1_val = f1_score(y_test, y_pred_binary)
+    precision_val = precision_score(y_test, y_pred_binary)
+    recall_val = recall_score(y_test, y_pred_binary)
+    roc_auc_val = roc_auc_score(y_test, y_pred)
+
+    return ConceptMetrics(
+      f1=f1_val,
+      precision=precision_val,
+      recall=recall_val,
+      roc_auc=roc_auc_val,
+      overall=_get_overall_score(f1_val))
 
 
 def draft_examples(concept: Concept, draft: DraftId) -> dict[str, Example]:
@@ -149,7 +241,7 @@ def draft_examples(concept: Concept, draft: DraftId) -> dict[str, Example]:
     raise ValueError(
       f'Draft {draft} not found in concept. Found drafts: {list(draft_examples.keys())}')
 
-  # Map the text of the draft to its id so we can dedup with main.
+  # Map the text of the draft to its id so we can dedupe with main.
   draft_text_ids = {example.text: id for id, example in draft_examples[draft].items()}
 
   # Write each of examples from main to the draft examples only if the text does not appear in the
@@ -174,7 +266,7 @@ class ConceptModel:
 
   column_info: Optional[ConceptColumnInfo] = None
 
-  # The following fields are excluded from JSON serialization, but still pickleable.
+  # The following fields are excluded from JSON serialization, but still pickle-able.
   # Maps a concept id to the embeddings.
   _embeddings: dict[str, np.ndarray] = dataclasses.field(default_factory=dict)
   _logistic_models: dict[DraftId, LogisticEmbeddingModel] = dataclasses.field(default_factory=dict)
@@ -224,12 +316,12 @@ class ConceptModel:
     examples = draft_examples(concept, DRAFT_MAIN)
     embeddings = np.array([self._embeddings[id] for id in examples.keys()])
     labels = [example.label for example in examples.values()]
-    if self._negative_vectors is not None:
-      num_implicit_labels = len(self._negative_vectors)
-      embeddings = np.concatenate([self._negative_vectors, embeddings])
-      labels = [False] * num_implicit_labels + labels
+    implicit_embeddings: Optional[np.ndarray] = None
+    implicit_labels: Optional[list[bool]] = None
     model = self._get_logistic_model(DRAFT_MAIN)
-    return model.compute_metrics(embeddings, labels)
+    model_str = f'{self.namespace}/{self.concept_name}/{self.embedding_name}/{self.version}'
+    with DebugTimer(f'Computing metrics for {model_str}'):
+      return model.compute_metrics(embeddings, labels, self._negative_vectors)
 
   def sync(self, concept: Concept) -> bool:
     """Update the model with the latest labeled concept data."""
@@ -247,18 +339,9 @@ class ConceptModel:
       examples = draft_examples(concept, draft)
       embeddings = np.array([self._embeddings[id] for id in examples.keys()])
       labels = [example.label for example in examples.values()]
-      num_pos_labels = len([x for x in labels if x])
-      num_neg_labels = len([x for x in labels if not x])
-      sample_weights = [(1.0 / num_pos_labels if x else 1.0 / num_neg_labels) for x in labels]
-      if self._negative_vectors is not None:
-        num_implicit_labels = len(self._negative_vectors)
-        embeddings = np.concatenate([self._negative_vectors, embeddings])
-        labels = [False] * num_implicit_labels + labels
-        sample_weights = [1.0 / num_implicit_labels] * num_implicit_labels + sample_weights
-
       model = self._get_logistic_model(draft)
       with DebugTimer(f'Fitting model for "{concept_path}"'):
-        model.fit(embeddings, labels, sample_weights)
+        model.fit(embeddings, labels, self._negative_vectors)
 
       # Synchronize the model version with the concept version.
       model.version = concept.version
