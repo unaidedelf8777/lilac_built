@@ -2,16 +2,21 @@
 
 import logging
 import os
+import shutil
+import subprocess
 from typing import Any
 
 from fastapi import APIRouter, FastAPI
-from fastapi.responses import ORJSONResponse
+from fastapi.responses import FileResponse, ORJSONResponse
 from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
+from huggingface_hub import snapshot_download
 
 from . import router_concept, router_data_loader, router_dataset, router_signal, router_tasks
+from .config import CONFIG, data_path
 from .router_utils import RouteErrorHandler
 from .tasks import task_manager
+from .utils import get_dataset_output_dir, list_datasets
 
 DIST_PATH = os.path.abspath(os.path.join('web', 'blueprint', 'build'))
 
@@ -49,8 +54,49 @@ v1_router.include_router(router_tasks.router, prefix='/tasks', tags=['tasks'])
 
 app.include_router(v1_router, prefix='/api/v1')
 
+
+@app.api_route('/{path_name}', include_in_schema=False)
+def catch_all() -> FileResponse:
+  """Catch any other requests and serve index for HTML5 history."""
+  return FileResponse(path=os.path.join(DIST_PATH, 'index.html'))
+
+
 # Serve static files in production mode.
-app.mount('/', StaticFiles(directory=os.path.join(DIST_PATH), html=True, check_dir=False))
+app.mount('/', StaticFiles(directory=DIST_PATH, html=True, check_dir=False))
+
+
+@app.on_event('startup')
+def startup() -> None:
+  """Download dataset files from the HF space that was uploaded before building the image."""
+  repo_id = CONFIG.get('HF_DATA_FROM_SPACE', None)
+
+  if repo_id:
+    # Download the huggingface space data. This includes code and datasets, so we move the datasets
+    # alone to the data directory.
+    spaces_download_dir = os.path.join(data_path(), '.hf_spaces', repo_id)
+    snapshot_download(
+      repo_id=repo_id,
+      repo_type='space',
+      local_dir=spaces_download_dir,
+      local_dir_use_symlinks=False,
+      token=CONFIG['HF_ACCESS_TOKEN'])
+
+    datasets = list_datasets(os.path.join(spaces_download_dir, 'data'))
+    for dataset in datasets:
+      spaces_dataset_output_dir = get_dataset_output_dir(
+        os.path.join(spaces_download_dir, 'data'), dataset.namespace, dataset.dataset_name)
+      persistent_output_dir = get_dataset_output_dir(data_path(), dataset.namespace,
+                                                     dataset.dataset_name)
+
+      # Huggingface doesn't let you selectively download files so we just copy the data directory
+      # out of the cloned space.
+      shutil.rmtree(persistent_output_dir, ignore_errors=True)
+      shutil.move(spaces_dataset_output_dir, persistent_output_dir)
+
+
+def run(cmd: str) -> subprocess.CompletedProcess[bytes]:
+  """Run a command and return the result."""
+  return subprocess.run(cmd, shell=True, check=True)
 
 
 @app.on_event('shutdown')

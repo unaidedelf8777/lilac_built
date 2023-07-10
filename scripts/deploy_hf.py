@@ -1,47 +1,59 @@
 """Deploy to a huggingface space."""
 import os
 import subprocess
+from typing import Optional
 
 import click
 from huggingface_hub import HfApi
 
-HF_SPACE_DIR = 'hf_spaces'
+from src.config import CONFIG, data_path
+from src.utils import get_dataset_output_dir
+
+HF_SPACE_DIR = os.path.join(data_path(), '.hf_spaces')
 
 
 @click.command()
 @click.option(
-  '--hf_username',
-  help='The huggingface username to use to authenticate for the space.',
-  type=str,
-  required=True)
+  '--hf_username', help='The huggingface username to use to authenticate for the space.', type=str)
 @click.option(
   '--hf_space',
-  help='The huggingface space. Should be formatted like `SPACE_ORG/SPACE_NAME`',
-  type=str,
-  required=True)
+  help='The huggingface space. Defaults to env.HF_STAGING_DEMO_REPO. '
+  'Should be formatted like `SPACE_ORG/SPACE_NAME`.',
+  type=str)
 @click.option(
   '--skip_build',
   help='Skip building the web server TypeScript. '
-  'Useful if you are only changing python or are only changing data.',
+  'Useful to speed up the build if you are only changing python or data.',
   type=bool,
   default=False)
 @click.option('--dataset', help='The name of a dataset to upload', type=str, multiple=True)
-def main(hf_username: str, hf_space: str, dataset: list[str], skip_build: bool) -> None:
+def main(hf_username: Optional[str], hf_space: Optional[str], dataset: list[str],
+         skip_build: bool) -> None:
   """Generate the huggingface space app."""
+  hf_username = hf_username or CONFIG['HF_USERNAME']
+  if not hf_username:
+    raise ValueError('Must specify --hf_username or set env.HF_USERNAME')
+
+  hf_space = hf_space or CONFIG['HF_STAGING_DEMO_REPO']
+  if not hf_space:
+    raise ValueError('Must specify --hf_space or set env.HF_STAGING_DEMO_REPO')
+
   # Upload datasets to HuggingFace.
   # NOTE(nsthorat): This currently doesn't write to persistent storage and does not work because of
   # a bug in HuggingFace.
   hf_api = HfApi()
   for d in dataset:
-    dataset_path = os.path.join('data', 'datasets', d)
+    namespace, name = d.split('/')
+
     hf_api.upload_folder(
-      folder_path=os.path.abspath(dataset_path),
-      path_in_repo='/' + dataset_path,
+      folder_path=get_dataset_output_dir(data_path(), namespace, name),
+      path_in_repo=get_dataset_output_dir('data', namespace, name),
       repo_id=hf_space,
       repo_type='space',
       # Delete all data on the server.
       delete_patterns='*')
 
+  # Build the web server Svelte & TypeScript.
   if not skip_build:
     run('sh ./scripts/build_server_prod.sh')
 
@@ -50,8 +62,12 @@ def main(hf_username: str, hf_space: str, dataset: list[str], skip_build: bool) 
   # Clone the HuggingFace spaces repo.
   repo_basedir = os.path.join(HF_SPACE_DIR, hf_space)
   run(f'rm -rf {repo_basedir}')
-  run(f'git clone https://{hf_username}@huggingface.co/spaces/{hf_space} {repo_basedir}')
+  run(f'git clone https://{hf_username}@huggingface.co/spaces/{hf_space} {repo_basedir} --depth 1')
 
+  # Clear out the repo.
+  run(f'rm -rf {repo_basedir}/*')
+
+  # Export the requirements file so it can be pip installed in the docker container.
   run(f'poetry export --without-hashes > {repo_basedir}/requirements.txt')
 
   # Copy source code.
@@ -61,9 +77,18 @@ def main(hf_username: str, hf_space: str, dataset: list[str], skip_build: bool) 
     run(f'cp -vaR ./{dir}/* {repo_basedir}/{dir}')
 
   # Copy a subset of root files.
-  copy_files = ['.env', 'Dockerfile', 'LICENSE']
+  copy_files = ['.dockerignore', '.env', 'Dockerfile', 'LICENSE']
   for file in copy_files:
     run(f'cp ./{file} {repo_basedir}/{file}')
+
+  # Create a .gitignore to avoid uploading unnecessary files.
+  with open(f'{repo_basedir}/.gitignore', 'w') as f:
+    f.write("""**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/*_test.py
+""")
 
   # Create the huggingface README.
   with open(f'{repo_basedir}/README.md', 'w') as f:

@@ -38,13 +38,37 @@ Details can be found at [Managing Spaces with Github Actions](https://huggingfac
 
 We use the HuggingFace git server, [follow the instructions](https://huggingface.co/docs/hub/repositories-getting-started) to use your git SSH keys to talk to HuggingFace.
 
-To deploy to huggingface:
+###### Staging demo
+
+1. Create a HuggingFace space.
+   Create a huggingface space from your browser: [huggingface.co/spaces](https://huggingface.co/spaces)
+
+2. Set .env.local environment variables so you can upload data to the soace:
+
+```sh
+# The repo to use for the huggingface demo.
+HF_STAGING_DEMO_REPO='lilacai/your-space'
+# To authenticate with HuggingFace for uploading to the space.
+HF_USERNAME='your-username'
+```
+
+3.  Generate a read-only token from [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) which will be used as `HF_ACCESS_TOKEN` below.
+
+4.  Open the HuggingFace space in your browser and click "Settings".
+
+5.  Set these two environment variables from the settings UI to
+    authenticate the binary running on HuggingFace to read private space data:
+
+- `LILAC_DL_HF_SPACE_DATA`: lilacai/your-space
+- `HF_ACCESS_TOKEN`: yourtoken
+
+6: Deploy to your HuggingFace Space:
 
 ```
 poetry run python -m scripts.deploy_hf \
-  --hf_username=$HF_USERNAME \
-  --hf_space=$HF_ORG/$HF_SPACE \
   --dataset=$DATASET_NAMESPACE/$DATASET_NAME
+
+# --hf_username and --hf_space are optional and can override the ENV for local uploading.
 ```
 
 #### Deployment
@@ -52,7 +76,7 @@ poetry run python -m scripts.deploy_hf \
 To build the docker image:
 
 ```sh
-./build_docker.sh
+./scripts/build_docker.sh
 ```
 
 To run the docker image locally:
