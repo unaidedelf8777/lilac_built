@@ -12,12 +12,15 @@
   import {Chip} from 'carbon-icons-svelte';
   import ThumbsDownFilled from 'carbon-icons-svelte/lib/ThumbsDownFilled.svelte';
   import ThumbsUpFilled from 'carbon-icons-svelte/lib/ThumbsUpFilled.svelte';
+  import Expandable from '../Expandable.svelte';
   import {hoverTooltip} from '../common/HoverTooltip';
   import ConceptExampleList from './ConceptExampleList.svelte';
   import ConceptHoverPill from './ConceptHoverPill.svelte';
+  import ConceptViewFieldSelect from './ConceptViewFieldSelect.svelte';
   import {scoreToColor, scoreToText} from './colors';
 
   export let concept: Concept;
+
   const conceptMutation = editConceptMutation();
   const embeddings = queryEmbeddings();
   $: conceptModels = queryConceptModels(concept.namespace, concept.concept_name);
@@ -67,9 +70,10 @@
       hideCloseButton
     />
   {:else if $conceptColumnInfos.data.length > 0}
-    <div>
-      <div class="text-lg font-semibold">Used on</div>
-      <div class="flex flex-col gap-y-2">
+    {@const numDatasets = $conceptColumnInfos.data.length}
+    <Expandable>
+      <div slot="above" class="text-md font-semibold">Used on {numDatasets} datasets</div>
+      <div slot="below" class="flex flex-col gap-y-3">
         {#each $conceptColumnInfos.data as column}
           <div>
             field <code>{serializePath(column.path)}</code> of dataset
@@ -79,11 +83,15 @@
           </div>
         {/each}
       </div>
-    </div>
+    </Expandable>
   {/if}
+  <Expandable>
+    <div slot="above" class="text-md font-semibold">Collect labels</div>
+    <ConceptViewFieldSelect {concept} slot="below" />
+  </Expandable>
   {#if $embeddings.data}
     <div class="flex flex-col gap-y-2">
-      <div class="text-lg font-semibold">Metrics</div>
+      <div class="text-md font-semibold">Metrics</div>
       <div class="model-metrics flex gap-x-4">
         {#each $embeddings.data as embedding}
           {@const model = embeddingToModel[embedding.name]}
