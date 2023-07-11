@@ -1,16 +1,35 @@
-import {L, valueAtPath, type Concept, type DataTypeCasted, type LilacValueNode} from '$lilac';
+import {
+  L,
+  UUID_COLUMN,
+  valueAtPath,
+  type Concept,
+  type DataTypeCasted,
+  type LilacValueNode
+} from '$lilac';
 
 export function getCandidates(
-  rows: LilacValueNode[] | undefined,
+  topRows: LilacValueNode[] | undefined,
+  randomRows: LilacValueNode[] | undefined,
   concept: Concept,
   fieldPath: string[],
   embedding: string
 ) {
-  if (rows == null) {
+  if (topRows == null || randomRows == null) {
     return [];
   }
-  const candidates: {text: string; score: number}[] = [];
-  for (const row of rows) {
+  const allRows = [...topRows, ...randomRows];
+  const uuids = new Set<string>();
+  const candidates: {
+    text: string;
+    score: number;
+    span: NonNullable<DataTypeCasted<'string_span'>>;
+  }[] = [];
+  for (const row of allRows) {
+    const uuid = L.value(valueAtPath(row, [UUID_COLUMN])!, 'string');
+    if (uuid == null || uuids.has(uuid)) {
+      continue;
+    }
+    uuids.add(uuid);
     const textNode = valueAtPath(row, fieldPath);
     if (textNode == null) {
       continue;
@@ -41,11 +60,13 @@ export function getCandidates(
       if (span == null) {
         continue;
       }
-      if (labeledSpans.some(s => s.start === span.start && s.end === span.end)) {
-        // Skip spans that are already labeled.
+
+      // Skip spans that overlap with labeled pieces.
+      const noOverlap = labeledSpans.every(l => l.start > span.end || l.end < span.start);
+      if (!noOverlap) {
         continue;
       }
-      const textSpan = text.slice(span.start, span.end);
+
       const scoreNode = valueAtPath(embNode, ['embedding', conceptId]);
       if (scoreNode == null) {
         continue;
@@ -54,7 +75,7 @@ export function getCandidates(
       if (score == null) {
         continue;
       }
-      candidates.push({text: textSpan, score});
+      candidates.push({text, span, score});
     }
   }
   // Sort by score, descending.
