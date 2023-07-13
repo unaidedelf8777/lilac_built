@@ -16,6 +16,7 @@
   import {hoverTooltip} from '../common/HoverTooltip';
   import ConceptExampleList from './ConceptExampleList.svelte';
   import ConceptHoverPill from './ConceptHoverPill.svelte';
+  import ConceptPreview from './ConceptPreview.svelte';
   import {scoreToColor, scoreToText} from './colors';
   import Labeler from './labeler/Labeler.svelte';
 
@@ -59,6 +60,12 @@
       <div class="text text-base text-gray-600">{concept.description}</div>
     {/if}
   </div>
+
+  <Expandable expanded>
+    <div slot="above" class="text-md font-semibold">Try it</div>
+    <ConceptPreview {concept} slot="below" />
+  </Expandable>
+
   {#if $embeddings.data}
     <Expandable expanded>
       <div slot="above" class="text-md font-semibold">Metrics</div>

@@ -1,20 +1,29 @@
 <script lang="ts">
+  import {getDatasetContext} from '$lib/stores/datasetStore';
+  import {getDatasetViewContext} from '$lib/stores/datasetViewStore';
   /**
    * Component that renders a single value from a row in the dataset row view
    * In the case of strings with string_spans, it will render the derived string spans as well
    */
   import {notEmpty} from '$lib/utils';
   import {
+    L,
     childFields,
     formatValue,
-    getFieldsByDtype,
     getValueNodes,
-    L,
+    isConceptScoreSignal,
+    pathIncludes,
+    pathIsEqual,
+    type ConceptLabelsSignal,
+    type ConceptScoreSignal,
     type LilacField,
     type LilacValueNode,
-    type Path
+    type Path,
+    type SemanticSimilaritySignal,
+    type SubstringSignal
   } from '$lilac';
   import StringSpanHighlight from './StringSpanHighlight.svelte';
+  import type {SpanValueInfo} from './spanHighlight';
 
   export let path: Path;
   export let row: LilacValueNode;
@@ -22,20 +31,96 @@
 
   $: visibleChildren = childFields(field);
 
-  // Find the keyword span paths under this field.
-  $: visibleKeywordSpanFields = visibleChildren
-    .filter(f => f.signal?.signal_name === 'substring_search')
-    .flatMap(f => getFieldsByDtype('string_span', f));
+  $: conceptSignals = visibleChildren.filter(f => isConceptScoreSignal(f.signal));
+  $: conceptLabelSignals = visibleChildren.filter(f => f.signal?.signal_name === 'concept_labels');
+  $: semanticSimilaritySignals = visibleChildren.filter(
+    f => f.signal?.signal_name === 'semantic_similarity'
+  );
+  $: keywordSignals = visibleChildren.filter(f => f.signal?.signal_name === 'substring_search');
 
   // Find the non-keyword span fields under this field.
-  $: visibleSpanFields = visibleChildren
-    .filter(f => f.signal?.signal_name !== 'substring_search')
-    .filter(f => f.dtype === 'string_span');
+  $: visibleSpanFields = visibleChildren.filter(f => f.dtype === 'string_span');
+  $: visibleSpanPaths = visibleSpanFields.map(f => f.path);
 
-  // Find the label fields.
-  $: visibleLabelSpanFields = visibleChildren
-    .filter(f => f.signal?.signal_name === 'concept_labels')
-    .flatMap(f => getFieldsByDtype('string_span', f));
+  let valuePaths: SpanValueInfo[] = [];
+  $: {
+    for (const visibleSpanField of visibleSpanFields) {
+      const spanChildren = childFields(visibleSpanField)
+        .filter(f => f.dtype != 'string_span')
+        .filter(f => visibleFields?.some(visibleField => pathIsEqual(visibleField.path, f.path)));
+      const spanPetalChildren = spanChildren.filter(f => f.dtype != null && f.dtype != 'embedding');
+      const spanPath = visibleSpanField.path;
+
+      const keywordSearch = keywordSignals.find(f => pathIncludes(visibleSpanField.path, f.path));
+
+      // Keyword spans don't have values.
+      if (keywordSearch != null) {
+        const signal = keywordSearch.signal as SubstringSignal;
+
+        valuePaths.push({
+          path: visibleSpanField.path,
+          spanPath,
+          type: 'keyword',
+          name: signal.query,
+          dtype: visibleSpanField.dtype!,
+          signal
+        });
+      }
+
+      for (const spanPetalChild of spanPetalChildren) {
+        const concept = conceptSignals.find(f => pathIncludes(spanPetalChild.path, f.path));
+        const conceptLabel = conceptLabelSignals.find(f =>
+          pathIncludes(spanPetalChild.path, f.path)
+        );
+        const semanticSimilarity = semanticSimilaritySignals.find(f =>
+          pathIncludes(spanPetalChild.path, f.path)
+        );
+        if (concept != null) {
+          const signal = concept.signal as ConceptScoreSignal;
+          valuePaths.push({
+            path: spanPetalChild.path,
+            spanPath,
+            type: 'concept_score',
+            name: `${signal.namespace}/${signal.concept_name}`,
+            dtype: spanPetalChild.dtype!,
+            signal
+          });
+        } else if (conceptLabel != null) {
+          const signal = conceptLabel.signal as ConceptLabelsSignal;
+          valuePaths.push({
+            path: spanPetalChild.path,
+            spanPath,
+            type: 'label',
+            name: `${signal.namespace}/${signal.concept_name} label`,
+            dtype: spanPetalChild.dtype!,
+            signal
+          });
+        } else if (semanticSimilarity != null) {
+          const signal = semanticSimilarity.signal as SemanticSimilaritySignal;
+          valuePaths.push({
+            path: spanPetalChild.path,
+            spanPath,
+            type: 'semantic_similarity',
+            name: `similarity: ${signal.query}`,
+            dtype: spanPetalChild.dtype!,
+            signal
+          });
+        } else {
+          valuePaths.push({
+            path: spanPetalChild.path,
+            spanPath,
+            type: 'metadata',
+            name: spanPetalChild.path[spanPetalChild.path.length - 1],
+            dtype: spanPetalChild.dtype!
+          });
+        }
+      }
+    }
+  }
+
+  const datasetViewStore = getDatasetViewContext();
+  const datasetStore = getDatasetContext();
+  const visibleFields = $datasetStore.visibleFields || [];
 
   $: values = getValueNodes(row, path)
     .map(v => L.value(v))
@@ -56,11 +141,11 @@
       <div class="font-normal">
         <StringSpanHighlight
           text={formatValue(value)}
-          {field}
           {row}
-          {visibleKeywordSpanFields}
-          {visibleSpanFields}
-          {visibleLabelSpanFields}
+          spanPaths={visibleSpanPaths}
+          {valuePaths}
+          {datasetViewStore}
+          datasetStore={$datasetStore}
         />
       </div>
     </div>

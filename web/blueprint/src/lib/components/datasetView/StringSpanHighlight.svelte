@@ -3,22 +3,26 @@
    * Component that renders string spans as an absolute positioned
    * layer, meant to be rendered on top of the source text.
    */
-  import {getDatasetContext} from '$lib/stores/datasetStore';
-  import {ITEM_SCROLL_CONTAINER_CTX_KEY, mergeSpans, type MergedSpan} from '$lib/view_utils';
+  import type {DatasetState} from '$lib/stores/datasetStore';
+  import {
+    ITEM_SCROLL_CONTAINER_CTX_KEY,
+    getComputedEmbeddings,
+    getSearchEmbedding,
+    getSearchPath,
+    mergeSpans,
+    type MergedSpan
+  } from '$lib/view_utils';
 
   import {editConceptMutation} from '$lib/queries/conceptQueries';
-  import {queryEmbeddings} from '$lib/queries/signalQueries';
-  import {getDatasetViewContext} from '$lib/stores/datasetViewStore';
+  import type {DatasetViewStore} from '$lib/stores/datasetViewStore';
   import {
     getValueNodes,
-    isConceptScoreSignal,
     pathIsEqual,
-    petals,
     serializePath,
-    type LilacField,
+    type ConceptScoreSignal,
     type LilacValueNode,
     type LilacValueNodeCasted,
-    type Signal
+    type Path
   } from '$lilac';
   import {Button} from 'carbon-components-svelte';
   import {ArrowDown, ArrowUp} from 'carbon-icons-svelte';
@@ -29,55 +33,46 @@
   import {spanHover} from './SpanHover';
   import type {SpanDetails} from './StringSpanDetails.svelte';
   import {LABELED_TEXT_COLOR, colorFromOpacity} from './colors';
-  import {getRenderSpans, getSnippetSpans, type RenderSpan} from './spanHighlight';
+  import {
+    getRenderSpans,
+    getSnippetSpans,
+    type RenderSpan,
+    type SpanValueInfo
+  } from './spanHighlight';
 
   export let text: string;
+  // The full row item.
   export let row: LilacValueNode;
-  export let field: LilacField;
-  export let visibleKeywordSpanFields: LilacField[];
-  export let visibleSpanFields: LilacField[];
-  export let visibleLabelSpanFields: LilacField[];
+  // Path of the spans for this item to render.
+  export let spanPaths: Path[];
+  // Information about each value under span paths to render.
+  export let valuePaths: SpanValueInfo[];
+
+  // When defined, enables semantic search on spans.
+  export let datasetViewStore: DatasetViewStore | undefined = undefined;
+  export let datasetStore: DatasetState | undefined = undefined;
 
   const spanHoverOpacity = 0.9;
 
-  const datasetViewStore = getDatasetViewContext();
-  const datasetStore = getDatasetContext();
-  $: schema = $datasetStore.selectRowsSchema?.data?.schema;
-
-  // Get the embeddings.
-  const embeddings = queryEmbeddings();
-
-  // Find the keyword span paths under this field.
-  $: keywordSpanPaths = visibleKeywordSpanFields.map(f => serializePath(f.path));
-  $: labelSpanPaths = visibleLabelSpanFields.map(f => serializePath(f.path));
-
-  // Map the span field paths to their children that are floats.
-  $: spanValueFields = Object.fromEntries(
-    visibleSpanFields.map(f => [
-      serializePath(f.path),
-      petals(f)
-        .filter(f => f.dtype != 'string_span')
-        .filter(f =>
-          $datasetStore.visibleFields?.some(visibleField => pathIsEqual(visibleField.path, f.path))
-        )
-    ])
-  );
-
-  // Filter the floats to only those that are concept scores.
-  let spanConceptFields: {[fieldName: string]: LilacField<Signal>[]};
-  $: spanConceptFields = Object.fromEntries(
-    Object.entries(spanValueFields)
-      .map(([path, fields]) => [path, fields.filter(f => isConceptScoreSignal(f.signal))])
-      .filter(([_, fields]) => fields.length > 0)
-  );
-
   // Map a path to the visible span fields.
   $: pathToSpans = Object.fromEntries(
-    visibleSpanFields.map(f => [
-      serializePath(f.path),
-      getValueNodes(row, f.path) as LilacValueNodeCasted<'string_span'>[]
+    spanPaths.map(p => [
+      serializePath(p),
+      getValueNodes(row, p) as LilacValueNodeCasted<'string_span'>[]
     ])
   );
+
+  let spanPathToValueInfos: Record<string, SpanValueInfo[]> = {};
+  $: {
+    spanPathToValueInfos = {};
+    for (const valuePath of valuePaths) {
+      const spanPathStr = serializePath(valuePath.spanPath);
+      if (spanPathToValueInfos[spanPathStr] == null) {
+        spanPathToValueInfos[spanPathStr] = [];
+      }
+      spanPathToValueInfos[spanPathStr].push(valuePath);
+    }
+  }
 
   // Merge all the spans for different features into a single span array.
   $: mergedSpans = mergeSpans(text, pathToSpans);
@@ -92,15 +87,7 @@
     renderSpan.paths.forEach(path => pathsHovered.delete(path));
     pathsHovered = pathsHovered;
   };
-  $: renderSpans = getRenderSpans(
-    mergedSpans,
-    schema,
-    spanValueFields,
-    keywordSpanPaths,
-    labelSpanPaths,
-    field,
-    pathsHovered
-  );
+  $: renderSpans = getRenderSpans(mergedSpans, spanPathToValueInfos, pathsHovered);
 
   // Map each of the paths to their render spans so we can highlight neighbors on hover when there
   // is overlap.
@@ -130,10 +117,14 @@
     };
     // Find the concepts for the selected spans. For now, we select just the first concept.
     for (const spanPath of Object.keys(span.originalSpans)) {
-      for (const conceptField of spanConceptFields[spanPath] || []) {
+      const conceptValues = (spanPathToValueInfos[spanPath] || []).filter(
+        v => v.type === 'concept_score'
+      );
+      for (const conceptValue of conceptValues) {
         // Only use the first concept. We will later support multiple concepts.
-        spanDetails.conceptName = conceptField.signal!.concept_name;
-        spanDetails.conceptNamespace = conceptField.signal!.namespace;
+        const signal = conceptValue.signal as ConceptScoreSignal;
+        spanDetails.conceptName = signal.concept_name;
+        spanDetails.conceptNamespace = signal.namespace;
         break;
       }
     }
@@ -158,6 +149,36 @@
   let itemScrollContainer = getContext<Writable<HTMLDivElement | null>>(
     ITEM_SCROLL_CONTAINER_CTX_KEY
   );
+
+  // Click details.
+  let searchPath: Path | null;
+  let computedEmbeddings: string[] = [];
+  let searchEmbedding: string | null = null;
+  $: {
+    if ($datasetViewStore != null && datasetStore != null) {
+      searchPath = getSearchPath($datasetViewStore, datasetStore);
+      computedEmbeddings = getComputedEmbeddings(datasetStore, searchPath);
+      searchEmbedding = getSearchEmbedding(
+        $datasetViewStore,
+        datasetStore,
+        searchPath,
+        computedEmbeddings
+      );
+    }
+  }
+
+  const findSimilar = (embedding: string, text: string) => {
+    if (datasetViewStore == null || searchPath == null || searchEmbedding == null) return;
+
+    datasetViewStore.addSearch({
+      path: [serializePath(searchPath)],
+      query: {
+        type: 'semantic',
+        search: text,
+        embedding
+      }
+    });
+  };
 </script>
 
 <div class="relative mx-4 overflow-x-hidden text-ellipsis whitespace-break-spaces py-4">
@@ -166,20 +187,19 @@
     {#if snippetSpan.isShown}
       <span
         use:spanHover={{
-          namedValues: renderSpan.hoverInfo,
+          namedValues: renderSpan.namedValues,
           isHovered: renderSpan.isFirstHover,
           spansHovered: pathsHovered,
           itemScrollContainer: $itemScrollContainer
         }}
         use:spanClick={{
           details: () => getSpanDetails(renderSpan),
-          datasetViewStore,
-          datasetStore,
-          embeddings: $embeddings.data || [],
+          findSimilar,
+          computedEmbeddings,
           addConceptLabel
         }}
         class="hover:cursor-poiner highlight-span text-sm leading-5"
-        class:hover:cursor-pointer={visibleSpanFields.length > 0}
+        class:hover:cursor-pointer={spanPaths.length > 0}
         class:font-bold={renderSpan.isBlackBolded}
         class:font-medium={renderSpan.isHighlightBolded && !renderSpan.isBlackBolded}
         style:color={renderSpan.isHighlightBolded && !renderSpan.isBlackBolded

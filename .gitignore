@@ -26,6 +26,7 @@ data/concept/**/*.pkl
 
 # Env
 .env.local
+.env.demo
 /web/*/coverage
 
 # Typescript.

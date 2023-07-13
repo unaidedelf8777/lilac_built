@@ -5,7 +5,6 @@
 
   export let row: LilacValueNode;
   export let mediaFields: LilacField[];
-
   export let visibleFields: LilacField[];
 
   const MIN_METADATA_HEIGHT_PX = 320;
