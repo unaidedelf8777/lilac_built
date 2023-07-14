@@ -1,5 +1,6 @@
 """Deploy to a huggingface space."""
 import os
+import shutil
 import subprocess
 from typing import Optional
 
@@ -32,6 +33,7 @@ HF_SPACE_DIR = os.path.join(data_path(), '.hf_spaces')
   help='Skip building the web server TypeScript. '
   'Useful to speed up the build if you are only changing python or data.',
   type=bool,
+  is_flag=True,
   default=False)
 def main(hf_username: Optional[str], hf_space: Optional[str], dataset: list[str],
          concept: list[str], skip_build: bool) -> None:
@@ -53,7 +55,8 @@ def main(hf_username: Optional[str], hf_space: Optional[str], dataset: list[str]
   # Clone the HuggingFace spaces repo.
   repo_basedir = os.path.join(HF_SPACE_DIR, hf_space)
   run(f'rm -rf {repo_basedir}')
-  run(f'git clone https://{hf_username}@huggingface.co/spaces/{hf_space} {repo_basedir} --depth 1')
+  run(f'git clone https://{hf_username}@huggingface.co/spaces/{hf_space} {repo_basedir} '
+      '--depth 1 --quiet --no-checkout')
 
   # Clear out the repo.
   run(f'rm -rf {repo_basedir}/*')
@@ -63,14 +66,13 @@ def main(hf_username: Optional[str], hf_space: Optional[str], dataset: list[str]
 
   # Copy source code.
   copy_dirs = ['src', 'web/blueprint/build']
-  for dir in copy_dirs:
-    run(f'mkdir -p {repo_basedir}/{dir}')
-    run(f'cp -vaR ./{dir}/* {repo_basedir}/{dir}')
+  for copy_dir in copy_dirs:
+    shutil.copytree(copy_dir, os.path.join(repo_basedir, copy_dir), dirs_exist_ok=True)
 
   # Copy a subset of root files.
   copy_files = ['.dockerignore', '.env', 'Dockerfile', 'LICENSE']
-  for file in copy_files:
-    run(f'cp ./{file} {repo_basedir}/{file}')
+  for copy_file in copy_files:
+    shutil.copyfile(copy_file, os.path.join(repo_basedir, copy_file))
 
   # Create an .env.local to set HF-specific flags.
   with open(f'{repo_basedir}/.env.demo', 'w') as f:
@@ -82,7 +84,7 @@ TRANSFORMERS_CACHE='/data/.cache'
 
   # Create a .gitignore to avoid uploading unnecessary files.
   with open(f'{repo_basedir}/.gitignore', 'w') as f:
-    f.write("""**/__pycache__
+    f.write("""__pycache__/
 **/*.pyc
 **/*.pyo
 **/*.pyd
@@ -100,12 +102,11 @@ sdk: docker
 app_port: 5432
 ---""")
 
-  # Push to the HuggingFace git repo.
-  run(f"""pushd {repo_basedir} && \
+  run(f"""pushd {repo_basedir} > /dev/null && \
       git add . && \
-      git commit -a -m "Push" && \
+      git commit -a -m "Push" --quiet && \
       git push && \
-      popd""")
+      popd > /dev/null""")
 
   # Upload datasets to HuggingFace. We do this after uploading code to avoid clobbering the data
   # directory.
@@ -119,6 +120,8 @@ app_port: 5432
       path_in_repo=get_dataset_output_dir('data', namespace, name),
       repo_id=hf_space,
       repo_type='space',
+      # Data files might be large, so we upload in chunks.
+      multi_commits=True,
       # Delete all data on the server.
       delete_patterns='*')
 

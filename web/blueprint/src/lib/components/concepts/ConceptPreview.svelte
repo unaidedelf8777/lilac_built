@@ -6,6 +6,7 @@
     deserializeRow,
     deserializeSchema,
     type Concept,
+    type Example,
     type LilacValueNode,
     type Path,
     type Signal
@@ -15,11 +16,26 @@
   import type {SpanValueInfo} from '../datasetView/spanHighlight';
 
   export let concept: Concept;
+  export let example: Example;
 
   const embeddings = queryEmbeddings();
 
   // User entered text.
-  let textareaText: string;
+  let textAreaText = example.text?.trim();
+
+  // Reset the text when the example changes.
+  $: {
+    if (example.text) {
+      textAreaText = example.text.trim();
+      previewText = undefined;
+    }
+  }
+
+  function textChanged(e: Event) {
+    textAreaText = (e.target as HTMLTextAreaElement).value;
+    previewText = undefined;
+  }
+
   // The text show in the highlight preview.
   let previewText: string | undefined = undefined;
   let previewEmbedding: string | undefined = undefined;
@@ -30,8 +46,7 @@
         })
       : null;
   function computeConceptScore() {
-    previewText = textareaText;
-    previewResultItem = undefined;
+    previewText = textAreaText;
   }
 
   let previewResultItem: LilacValueNode | undefined = undefined;
@@ -81,7 +96,8 @@
 <div class="flex flex-col gap-x-8">
   <div>
     <TextArea
-      bind:value={textareaText}
+      value={textAreaText}
+      on:input={textChanged}
       cols={50}
       placeholder="Paste text to test the concept."
       rows={6}
