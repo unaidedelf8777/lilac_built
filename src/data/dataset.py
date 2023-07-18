@@ -2,6 +2,7 @@
 import abc
 import datetime
 import enum
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Iterator, Literal, Optional, Sequence, Union
 
 import pandas as pd
@@ -160,6 +161,16 @@ class Column(BaseModel):
 ColumnId = Union[Path, Column]
 
 
+class DatasetUISettings(BaseModel):
+  """The UI persistent settings for a dataset."""
+  media_paths: list[PathTuple] = []
+
+
+class DatasetSettings(BaseModel):
+  """The persistent settings for a dataset."""
+  ui: Optional[DatasetUISettings]
+
+
 class DatasetManifest(BaseModel):
   """The manifest for a dataset."""
   namespace: str
@@ -252,6 +263,16 @@ class Dataset(abc.ABC):
   @abc.abstractmethod
   def manifest(self) -> DatasetManifest:
     """Return the manifest for the dataset."""
+    pass
+
+  @abc.abstractmethod
+  def settings(self) -> DatasetSettings:
+    """Return the persistent settings for the dataset."""
+    pass
+
+  @abc.abstractmethod
+  def update_settings(self, settings: DatasetSettings) -> None:
+    """Update the settings for the dataset."""
     pass
 
   @abc.abstractmethod
@@ -384,6 +405,20 @@ class Dataset(abc.ABC):
       A MediaResult.
     """
     pass
+
+
+def default_settings(dataset: Dataset) -> DatasetSettings:
+  """Gets the default settings for a dataset."""
+  leaf_paths = dataset.manifest().data_schema.leafs.keys()
+  pool = ThreadPoolExecutor()
+  stats: list[StatsResult] = list(pool.map(lambda leaf: dataset.stats(leaf), leaf_paths))
+  sorted_stats = sorted([stat for stat in stats if stat.avg_text_length],
+                        key=lambda stat: stat.avg_text_length or -1.0)
+  media_paths = []
+  if sorted_stats:
+    media_paths = [sorted_stats[-1].path]
+
+  return DatasetSettings(ui=DatasetUISettings(media_paths=media_paths))
 
 
 def make_parquet_id(signal: Signal,
