@@ -18,10 +18,13 @@ import click
 import pandas as pd
 from distributed import Client
 
+from .config import data_path
+from .data.dataset import Dataset
 from .data.dataset_utils import write_items_to_parquet
 from .data.sources.default_sources import register_default_sources
 from .data.sources.source import Source
 from .data.sources.source_registry import resolve_source
+from .db_manager import get_dataset
 from .schema import (
   MANIFEST_FILENAME,
   PARQUET_FILENAME_PREFIX,
@@ -35,6 +38,16 @@ from .schema import (
 )
 from .tasks import TaskStepId, progress
 from .utils import get_dataset_output_dir, log, open_file
+
+
+def create_dataset(
+  namespace: str,
+  dataset_name: str,
+  source_config: Source,
+) -> Dataset:
+  """Load a dataset from a given source configuration."""
+  process_source(data_path(), namespace, dataset_name, source_config)
+  return get_dataset(namespace, dataset_name)
 
 
 def process_source(base_dir: Union[str, pathlib.Path],
