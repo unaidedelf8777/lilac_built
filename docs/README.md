@@ -2,14 +2,8 @@
 
 We use Sphinx to auto-generate the API reference.
 
-First-time setup:
+To generate documentation, run this from the project root:
 
 ```bash
-./setup.sh
-```
-
-To generate documentation:
-
-```bash
-./build_docs.sh
+./scripts/build_docs.sh
 ```
