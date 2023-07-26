@@ -1,6 +1,7 @@
 """The interface for the database."""
 import abc
 import enum
+import pathlib
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Any, Iterator, Literal, Optional, Sequence, Union
@@ -13,7 +14,7 @@ from pydantic import StrictBool, StrictBytes, StrictFloat, StrictInt, StrictStr,
 from ..auth import UserInfo
 from ..embeddings.vector_store import VectorStore
 from ..schema import VALUE_KEY, Bin, DataType, Path, PathTuple, Schema, normalize_path
-from ..signals.signal import Signal, resolve_signal
+from ..signals.signal import Signal, TextEmbeddingSignal, get_signal_by_type, resolve_signal
 from ..tasks import TaskStepId
 
 # Threshold for rejecting certain queries (e.g. group by) for columns with large cardinality.
@@ -219,20 +220,20 @@ SearchValue = StrictStr
 
 class KeywordQuery(BaseModel):
   """A keyword search query on a column."""
-  type: Literal['keyword']
+  type: Literal['keyword'] = 'keyword'
   search: SearchValue
 
 
 class SemanticQuery(BaseModel):
   """A semantic search on a column."""
-  type: Literal['semantic']
+  type: Literal['semantic'] = 'semantic'
   search: SearchValue
   embedding: str
 
 
 class ConceptQuery(BaseModel):
   """A concept search query on a column."""
-  type: Literal['concept']
+  type: Literal['concept'] = 'concept'
   concept_namespace: str
   concept_name: str
   embedding: str
@@ -300,6 +301,11 @@ class Dataset(abc.ABC):
         progress of the task.
     """
     pass
+
+  def compute_embedding(self, embedding_name: str, path: Path) -> None:
+    """Compute an embedding for a given field path."""
+    signal = get_signal_by_type(embedding_name, TextEmbeddingSignal)()
+    self.compute_signal(signal, path)
 
   @abc.abstractmethod
   def delete_signal(self, signal_path: Path) -> None:
@@ -411,6 +417,39 @@ class Dataset(abc.ABC):
 
     Returns
       A MediaResult.
+    """
+    pass
+
+  @abc.abstractmethod
+  def to_json(self, filepath: Union[str, pathlib.Path], jsonl: bool = True) -> None:
+    """Export the dataset to a JSON file.
+
+    Args:
+      filepath: The path to the file to export to.
+      jsonl: Whether to export to JSONL or JSON.
+    """
+    pass
+
+  @abc.abstractmethod
+  def to_pandas(self) -> pd.DataFrame:
+    """Export the dataset to a pandas DataFrame."""
+    pass
+
+  @abc.abstractmethod
+  def to_parquet(self, filepath: Union[str, pathlib.Path]) -> None:
+    """Export the dataset to a parquet file.
+
+    Args:
+      filepath: The path to the file to export to.
+    """
+    pass
+
+  @abc.abstractmethod
+  def to_csv(self, filepath: Union[str, pathlib.Path]) -> None:
+    """Export the dataset to a csv file.
+
+    Args:
+      filepath: The path to the file to export to.
     """
     pass
 

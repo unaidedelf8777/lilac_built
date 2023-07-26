@@ -3,6 +3,7 @@ import functools
 import glob
 import math
 import os
+import pathlib
 import re
 import shutil
 import threading
@@ -343,18 +344,22 @@ class DatasetDuckDB(Dataset):
     step_id: Optional[int] = None
     if task_step_id:
       (task_id, step_id) = task_step_id
-      if new_steps:
+      if task_id != '' and new_steps:
         # Make a step for the parent.
         set_worker_steps(task_id, [TaskStepInfo()] * (new_steps + 1))
 
     for i, (new_path, signal) in enumerate(signals_to_compute):
       if new_path not in manifest.data_schema.leafs:
-        self.compute_signal(signal, source_path, task_step_id=(task_id, i) if task_id else None)
+        self.compute_signal(
+          signal, source_path, task_step_id=(task_id, i) if task_id is not None else None)
 
     if is_value_path:
       new_path = (*new_path, VALUE_KEY)
 
-    return (new_path, (task_id, step_id + new_steps) if task_id and step_id else None)
+    new_task_id: Optional[TaskStepId] = None
+    if task_id is not None and step_id is not None:
+      new_task_id = (task_id, step_id + new_steps)
+    return (new_path, new_task_id)
 
   @override
   def compute_signal(self,
@@ -363,6 +368,10 @@ class DatasetDuckDB(Dataset):
                      task_step_id: Optional[TaskStepId] = None) -> None:
     source_path = normalize_path(leaf_path)
     manifest = self.manifest()
+
+    if task_step_id is None:
+      # Make a dummy task step so we report progress via tqdm.
+      task_step_id = ('', 0)
 
     # Prepare the dependencies of this signal.
     signal_source_path, task_step_id = self._prepare_signal(
@@ -427,7 +436,7 @@ class DatasetDuckDB(Dataset):
     signal_manifest_filepath = os.path.join(output_dir, SIGNAL_MANIFEST_FILENAME)
     with open_file(signal_manifest_filepath, 'w') as f:
       f.write(signal_manifest.json(exclude_none=True, indent=2))
-    log(f'Wrote signal manifest to {signal_manifest_filepath}')
+    log(f'Wrote signal output to {output_dir}')
 
   @override
   def delete_signal(self, signal_path: Path) -> None:
@@ -983,7 +992,7 @@ class DatasetDuckDB(Dataset):
       signal_column = list(temp_signal_cols.keys())[0]
       input = df[signal_column]
 
-      with DebugTimer(f'Computing signal "{signal}"'):
+      with DebugTimer(f'Computing signal "{signal.signal_name}"'):
         signal.setup()
 
         if signal.compute_type in [SignalInputType.TEXT_EMBEDDING]:
@@ -999,7 +1008,7 @@ class DatasetDuckDB(Dataset):
               signal_out,
               task_step_id=task_step_id,
               estimated_len=len(flat_keys),
-              step_description=f'Computing {signal.key()}...')
+              step_description=f'Computing {signal.key()}')
           df[signal_column] = unflatten(signal_out, input)
         else:
           num_rich_data = count_primitives(input)
@@ -1012,7 +1021,7 @@ class DatasetDuckDB(Dataset):
               signal_out,
               task_step_id=task_step_id,
               estimated_len=num_rich_data,
-              step_description=f'Computing {signal.key()}...')
+              step_description=f'Computing {signal.key()}')
           signal_out_list = list(signal_out)
           if signal_column in temp_column_to_offset_column:
             offset_column_name, field = temp_column_to_offset_column[signal_column]
@@ -1430,6 +1439,25 @@ class DatasetDuckDB(Dataset):
     return '.'.join([
       f'{_escape_col_name(path_comp)}' if quote_each_part else str(path_comp) for path_comp in path
     ])
+
+  @override
+  def to_json(self, filepath: Union[str, pathlib.Path], jsonl: bool = True) -> None:
+    self._execute(f"COPY t TO '{filepath}' (FORMAT JSON, ARRAY {'FALSE' if jsonl else 'TRUE'})")
+    log(f'Dataset exported to {filepath}')
+
+  @override
+  def to_pandas(self) -> pd.DataFrame:
+    return self._query_df('SELECT * FROM t')
+
+  @override
+  def to_csv(self, filepath: Union[str, pathlib.Path]) -> None:
+    self._execute(f"COPY t TO '{filepath}' (FORMAT CSV, HEADER)")
+    log(f'Dataset exported to {filepath}')
+
+  @override
+  def to_parquet(self, filepath: Union[str, pathlib.Path]) -> None:
+    self._execute(f"COPY t TO '{filepath}' (FORMAT PARQUET)")
+    log(f'Dataset exported to {filepath}')
 
 
 def _escape_string_literal(string: str) -> str:
