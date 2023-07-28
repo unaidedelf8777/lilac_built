@@ -3,6 +3,7 @@
   import {maybeQueryDatasetSchema, queryDatasets} from '$lib/queries/datasetQueries';
   import {createDatasetViewStore} from '$lib/stores/datasetViewStore';
   import {getSettingsContext} from '$lib/stores/settingsStore';
+  import {getUrlHashContext} from '$lib/stores/urlHashStore';
   import {datasetLink} from '$lib/utils';
   import {
     childFields,
@@ -25,6 +26,8 @@
   import DataFeeder from './DataFeeder.svelte';
 
   export let concept: Concept;
+
+  $: urlHashStore = getUrlHashContext();
   const settings = getSettingsContext();
 
   let dataset: {namespace: string; name: string} | undefined | null = undefined;
@@ -119,7 +122,7 @@
   }
 
   $: datasetViewStore =
-    dataset != null ? createDatasetViewStore(dataset.namespace, dataset.name) : null;
+    dataset != null ? createDatasetViewStore(urlHashStore, dataset.namespace, dataset.name) : null;
   function openDataset() {
     if (datasetViewStore == null || pathId == null || embedding == null || dataset == null) return;
     datasetViewStore.addSearch({

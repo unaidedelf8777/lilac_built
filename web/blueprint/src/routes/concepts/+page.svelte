@@ -8,7 +8,7 @@
   import {queryAuthInfo} from '$lib/queries/serverQueries';
   import {datasetStores} from '$lib/stores/datasetStore';
   import {datasetViewStores} from '$lib/stores/datasetViewStore';
-  import {urlHash} from '$lib/stores/urlHashStore';
+  import {getUrlHashContext} from '$lib/stores/urlHashStore';
   import {conceptLink} from '$lib/utils';
   import {getSortedConcepts} from '$lib/view_utils';
   import {Button, Modal, SkeletonText} from 'carbon-components-svelte';
@@ -18,14 +18,22 @@
   let namespace: string | undefined;
   let conceptName: string | undefined;
 
-  $: $urlHash.onHashChange('', () => {
-    namespace = undefined;
-    conceptName = undefined;
-  });
-  $: $urlHash.onHashChange('/(?<namespace>.+)/(?<conceptName>.+)', ctx => {
-    namespace = ctx.namespace;
-    conceptName = ctx.conceptName;
-  });
+  const urlHashStore = getUrlHashContext();
+
+  $: {
+    if ($urlHashStore.page === 'concepts') {
+      if ($urlHashStore.identifier == '' || $urlHashStore.identifier == null) {
+        namespace = undefined;
+        conceptName = undefined;
+      } else {
+        const [newNamespace, newConceptName] = $urlHashStore.identifier.split('/');
+        if (namespace != newNamespace || conceptName != newConceptName) {
+          namespace = newNamespace;
+          conceptName = newConceptName;
+        }
+      }
+    }
+  }
 
   let deleteConceptInfo: {namespace: string; name: string} | null = null;
 
@@ -129,12 +137,14 @@
   <div class="flex h-full w-full">
     <div class="lilac-container">
       <div class="lilac-page flex">
-        {#if $concept?.isLoading}
-          <SkeletonText />
-        {:else if $concept?.isError}
-          <p>{$concept.error}</p>
-        {:else if $concept?.isSuccess}
-          <ConceptView concept={$concept.data} />
+        {#if namespace != null && conceptName != null}
+          {#if $concept?.isLoading}
+            <SkeletonText />
+          {:else if $concept?.isError}
+            <p>{$concept.error}</p>
+          {:else if $concept?.isSuccess}
+            <ConceptView concept={$concept.data} />
+          {/if}
         {/if}
       </div>
     </div>
