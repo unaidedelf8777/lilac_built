@@ -11,25 +11,16 @@ from pydantic import parse_obj_as
 from pytest_mock import MockerFixture
 from typing_extensions import override
 
-from .concepts.concept import (
-  DRAFT_MAIN,
-  Concept,
-  Example,
-  ExampleIn,
-  ExampleOrigin,
-  LogisticEmbeddingModel,
-)
+from .concepts.concept import DRAFT_MAIN, Concept, ConceptModel, Example, ExampleIn, ExampleOrigin
 from .concepts.db_concept import ConceptACL, ConceptInfo, ConceptUpdate
-from .data.dataset_utils import lilac_embedding, lilac_span
 from .router_concept import (
   ConceptModelInfo,
   CreateConceptOptions,
   MergeConceptDraftOptions,
   ScoreBody,
   ScoreExample,
-  ScoreResponse,
 )
-from .schema import Item, RichData, SignalInputType
+from .schema import Item, RichData, SignalInputType, lilac_embedding, lilac_span
 from .server import app
 from .signals.signal import TextEmbeddingSignal, clear_signal_registry, register_signal
 from .test_utils import fake_uuid
@@ -380,16 +371,15 @@ def test_concept_model_sync(mocker: MockerFixture) -> None:
     version=1)
 
   # Score an example.
-  mock_score_emb = mocker.patch.object(LogisticEmbeddingModel, 'score_embeddings', autospec=True)
+  mock_score_emb = mocker.patch.object(ConceptModel, 'score_embeddings', autospec=True)
+  # The return value here is a batch of values.
   mock_score_emb.return_value = np.array([0.9, 1.0])
   url = '/api/v1/concepts/concept_namespace/concept/model/test_embedding/score'
   score_body = ScoreBody(examples=[ScoreExample(text='hello world'), ScoreExample(text='hello')])
   response = client.post(url, json=score_body.dict())
   assert response.status_code == 200
-  assert ScoreResponse.parse_obj(response.json()) == ScoreResponse(
-    scored_spans=[[lilac_span(0, 11, {'score': 0.9})], [lilac_span(0, 5, {'score': 0.9})]],
-    # The model should already be synced.
-    model_synced=False)
+  assert response.json() == [[lilac_span(0, 11, {'score': 0.9})],
+                             [lilac_span(0, 5, {'score': 1.0})]]
 
 
 def test_concept_edits_error_before_create(mocker: MockerFixture) -> None:

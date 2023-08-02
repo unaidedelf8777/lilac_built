@@ -5,11 +5,12 @@ import numpy as np
 from typing_extensions import override
 
 from ..auth import UserInfo
+from ..batch_utils import flat_batched_compute
 from ..concepts.concept import DEFAULT_NUM_NEG_EXAMPLES, DRAFT_MAIN, ConceptColumnInfo, ConceptModel
 from ..concepts.db_concept import DISK_CONCEPT_MODEL_DB, ConceptModelDB
-from ..data.dataset_utils import lilac_span
+from ..embeddings.embedding import get_embed_fn
 from ..embeddings.vector_store import VectorDBIndex
-from ..schema import Field, Item, PathKey, RichData, SignalInputType, field
+from ..schema import Field, Item, PathKey, RichData, SignalInputType, SpanVector, field, lilac_span
 from ..signals.signal import VectorSignal
 
 
@@ -66,25 +67,34 @@ class ConceptScoreSignal(VectorSignal):
     self._concept_model_db.sync(model, self._user)
     return model
 
-  @override
-  def compute(self, data: Iterable[RichData]) -> Iterable[Optional[Item]]:
+  def _score_span_vectors(self,
+                          span_vectors: Iterable[Iterable[SpanVector]]) -> Iterable[Optional[Item]]:
     concept_model = self._get_concept_model()
-    return concept_model.score(self.draft, data)
+
+    return flat_batched_compute(
+      span_vectors,
+      f=lambda vectors: self._compute_span_vector_batch(vectors, concept_model),
+      batch_size=concept_model.batch_size)
+
+  def _compute_span_vector_batch(self, span_vectors: Iterable[SpanVector],
+                                 concept_model: ConceptModel) -> list[Item]:
+    vectors = [sv['vector'] for sv in span_vectors]
+    spans = [sv['span'] for sv in span_vectors]
+    scores = concept_model.score_embeddings(self.draft, np.array(vectors)).tolist()
+    return [lilac_span(start, end, {'score': score}) for score, (start, end) in zip(scores, spans)]
+
+  @override
+  def compute(self, examples: Iterable[RichData]) -> Iterable[Optional[Item]]:
+    """Get the scores for the provided examples."""
+    embed_fn = get_embed_fn(self.embedding, split=True)
+    span_vectors = embed_fn(examples)
+    return self._score_span_vectors(span_vectors)
 
   @override
   def vector_compute(self, keys: Iterable[PathKey],
                      vector_index: VectorDBIndex) -> Iterable[Optional[Item]]:
-    concept_model = self._get_concept_model()
-    all_vector_spans = vector_index.get(keys)
-    # TODO(smilkov): Do this with batched computation.
-    for vector_spans in all_vector_spans:
-      embeddings = np.array([vector_span['vector'] for vector_span in vector_spans])
-      scores = concept_model.score_embeddings(self.draft, embeddings)
-      res: Item = []
-      for vector_span, score in zip(vector_spans, scores):
-        start, end = vector_span['span']
-        res.append(lilac_span(start, end, {'score': score}))
-      yield res
+    span_vectors = vector_index.get(keys)
+    return self._score_span_vectors(span_vectors)
 
   @override
   def vector_compute_topk(

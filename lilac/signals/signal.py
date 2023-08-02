@@ -11,9 +11,7 @@ if TYPE_CHECKING:
 from typing_extensions import override
 
 from ..embeddings.vector_store import VectorDBIndex
-from ..schema import Field, Item, PathKey, RichData, SignalInputType, field
-
-EMBEDDING_KEY = 'embedding'
+from ..schema import EMBEDDING_KEY, Field, Item, PathKey, RichData, SignalInputType, field
 
 
 class Signal(abc.ABC, BaseModel):

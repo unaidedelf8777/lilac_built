@@ -1,14 +1,16 @@
 """Router for the signal registry."""
 
 import math
-from typing import Any
+from typing import Annotated, Any, Optional
 
-from fastapi import APIRouter
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel, validator
 
-from .router_utils import RouteErrorHandler
-from .schema import SignalInputType
-from .signals.signal import SIGNAL_REGISTRY, TextEmbeddingSignal
+from .auth import UserInfo, get_session_user
+from .router_utils import RouteErrorHandler, server_compute_concept
+from .schema import Field, SignalInputType
+from .signals.concept_scorer import ConceptScoreSignal
+from .signals.signal import SIGNAL_REGISTRY, Signal, TextEmbeddingSignal, resolve_signal
 
 router = APIRouter(route_class=RouteErrorHandler)
 
@@ -48,3 +50,55 @@ def get_embeddings() -> list[SignalInfo]:
     if s.name in EMBEDDING_SORT_PRIORITIES else math.inf)
 
   return embedding_infos
+
+
+class SignalComputeOptions(BaseModel):
+  """The request for the standalone compute signal endpoint."""
+  signal: Signal
+  # The inputs to compute.
+  inputs: list[str]
+
+  @validator('signal', pre=True)
+  def parse_signal(cls, signal: dict) -> Signal:
+    """Parse a signal to its specific subclass instance."""
+    return resolve_signal(signal)
+
+
+class SignalComputeResponse(BaseModel):
+  """The response for the standalone compute signal endpoint."""
+  items: list[Optional[Any]]
+
+
+@router.post('/compute', response_model_exclude_none=True)
+def compute(
+    options: SignalComputeOptions,
+    user: Annotated[Optional[UserInfo], Depends(get_session_user)]) -> SignalComputeResponse:
+  """Compute a signal over a set of inputs."""
+  signal = options.signal
+  if isinstance(signal, ConceptScoreSignal):
+    result = server_compute_concept(signal, options.inputs, user)
+  else:
+    result = list(signal.compute(options.inputs))
+  return SignalComputeResponse(items=result)
+
+
+class SignalSchemaOptions(BaseModel):
+  """The request for the signal schema endpoint."""
+  signal: Signal
+
+  @validator('signal', pre=True)
+  def parse_signal(cls, signal: dict) -> Signal:
+    """Parse a signal to its specific subclass instance."""
+    return resolve_signal(signal)
+
+
+class SignalSchemaResponse(BaseModel):
+  """The response for the signal schema endpoint."""
+  fields: Field
+
+
+@router.post('/schema', response_model_exclude_none=True)
+def schema(options: SignalSchemaOptions) -> SignalSchemaResponse:
+  """Get the schema for a signal."""
+  signal = options.signal
+  return SignalSchemaResponse(fields=signal.fields())
