@@ -5,8 +5,8 @@ import {
   deserializePath,
   getField,
   getFieldsByDtype,
+  pathIncludes,
   pathIsEqual,
-  pathIsMatching,
   serializePath,
   type AuthenticationInfo,
   type ConceptInfo,
@@ -222,7 +222,7 @@ export function isPreviewSignal(
   path: Path | undefined
 ): boolean {
   if (path == null || selectRowsSchema == null) return false;
-  return (selectRowsSchema.udfs || []).some(udf => pathIsMatching(udf.path, path));
+  return (selectRowsSchema.udfs || []).some(udf => pathIncludes(path, udf.path));
 }
 
 /** Gets the search type for a column, if defined. The path is the *input* path to the search. */
@@ -352,9 +352,7 @@ export function mergeSpans(
   inputSpanSets: {[spanSet: string]: LilacValueNodeCasted<'string_span'>[]}
 ): MergedSpan[] {
   // Remove empty span arrays as they don't contribute to the final spans.
-  inputSpanSets = Object.fromEntries(
-    Object.entries(inputSpanSets).filter(([_, v]) => v.length > 0)
-  );
+  inputSpanSets = Object.fromEntries(Object.entries(inputSpanSets).filter(([, v]) => v.length > 0));
 
   const spanSetKeys = Object.keys(inputSpanSets);
   if (spanSetKeys.length === 0) {
