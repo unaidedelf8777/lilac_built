@@ -102,8 +102,8 @@ app_port: 5432
 
   run(f"""pushd {repo_basedir} > /dev/null && \
       git add . && git add -f lilac/web && \
-      git commit -a -m "Push" --quiet && \
-      git push && \
+      (git diff-index --quiet --cached HEAD ||
+        (git commit -a -m "Push" --quiet && git push)) && \
       popd > /dev/null""")
 
   # Upload datasets to HuggingFace. We do this after uploading code to avoid clobbering the data
@@ -118,8 +118,6 @@ app_port: 5432
       path_in_repo=get_dataset_output_dir('data', namespace, name),
       repo_id=hf_space,
       repo_type='space',
-      # Data files might be large, so we upload in chunks.
-      multi_commits=True,
       # Delete all data on the server.
       delete_patterns='*')
 
