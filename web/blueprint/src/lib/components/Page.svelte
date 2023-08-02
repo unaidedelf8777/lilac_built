@@ -66,7 +66,7 @@
   </div>
 
   <!-- Body -->
-  <div class="flex h-full w-full overflow-hidden">
+  <div class="relative flex h-full w-full overflow-hidden">
     <slot />
   </div>
 </div>
