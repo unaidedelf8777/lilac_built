@@ -72,7 +72,7 @@ export function defaultDatasetViewState(namespace: string, datasetName: string):
 }
 
 export function createDatasetViewStore(
-  appStore: UrlHashStateStore,
+  urlHashStore: UrlHashStateStore,
   namespace: string,
   datasetName: string
 ) {
@@ -268,7 +268,7 @@ export function createDatasetViewStore(
     'datasets',
     `${namespace}/${datasetName}`,
     store,
-    appStore,
+    urlHashStore,
     hashState => deserializeState(hashState, defaultState),
     state => serializeState(state, defaultState)
   );
