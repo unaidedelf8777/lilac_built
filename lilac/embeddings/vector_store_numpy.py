@@ -23,10 +23,10 @@ class NumpyVectorStore(VectorStore):
     self._key_to_index: Optional[pd.Series] = None
 
   @override
-  def keys(self) -> list[VectorKey]:
-    assert self._key_to_index is not None, (
+  def size(self) -> int:
+    assert self._embeddings is not None, (
       'The vector store has no embeddings. Call load() or add() first.')
-    return self._key_to_index.index.tolist()
+    return len(self._embeddings)
 
   @override
   def save(self, base_path: str) -> None:
