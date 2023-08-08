@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from typing_extensions import override
 
 from ..auth import ConceptAuthorizationException, UserInfo
-from ..config import data_path, env
+from ..env import data_path, env
 from ..schema import SignalInputType
 from ..signals.signal import get_signal_cls
 from ..utils import delete_file, file_exists, open_file

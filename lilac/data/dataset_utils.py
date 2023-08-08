@@ -13,8 +13,8 @@ import numpy as np
 import pyarrow as pa
 
 from ..batch_utils import deep_flatten
-from ..config import env
 from ..embeddings.vector_store import VectorDBIndex
+from ..env import env
 from ..parquet_writer import ParquetWriter
 from ..schema import (
   EMBEDDING_KEY,

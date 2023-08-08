@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 from .auth import UserInfo, get_session_user
 from .concepts.concept import DRAFT_MAIN, Concept, ConceptMetrics, DraftId, draft_examples
 from .concepts.db_concept import DISK_CONCEPT_DB, DISK_CONCEPT_MODEL_DB, ConceptInfo, ConceptUpdate
-from .config import env
+from .env import env
 from .router_utils import RouteErrorHandler, server_compute_concept
 from .schema import RichData, SignalInputType
 from .signals.concept_scorer import ConceptScoreSignal
