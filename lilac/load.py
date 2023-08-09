@@ -22,9 +22,11 @@ from distributed import Client
 from pydantic import ValidationError
 
 from .config import Config, DatasetConfig, EmbeddingConfig, SignalConfig
+from .data.dataset import Dataset
+from .data.dataset_duckdb import DatasetDuckDB
 from .data_loader import process_source
-from .db_manager import get_dataset
-from .schema import UUID_COLUMN
+from .db_manager import get_dataset, remove_dataset_from_cache
+from .schema import UUID_COLUMN, PathTuple
 from .tasks import TaskManager, TaskStepId
 from .utils import DebugTimer, get_datasets_dir, list_datasets
 
@@ -56,6 +58,8 @@ def load(output_dir: str, config_path: str, overwrite: bool) -> None:
   os.environ['LILAC_DATA_PATH'] = output_dir
   # Turn off debug logging.
   del os.environ['DEBUG']
+  # Use views to avoid loading duckdb tables into RAM since we aren't query heavy.
+  os.environ['DUCKDB_USE_VIEWS'] = '1'
 
   config_ext = pathlib.Path(config_path).suffix
   if config_ext in ['.yml', '.yaml']:
@@ -85,7 +89,7 @@ def load(output_dir: str, config_path: str, overwrite: bool) -> None:
 
   # Explicitly create a dask client in sync mode.
   dask.config.set({'distributed.worker.daemon': False})
-  total_memory_gb = psutil.virtual_memory().total / (1024**3)
+  total_memory_gb = psutil.virtual_memory().total / (1024**3) * 2 / 3
   task_manager = TaskManager(Client(memory_limit=f'{total_memory_gb} GB'))
 
   if overwrite:
@@ -117,9 +121,13 @@ def load(output_dir: str, config_path: str, overwrite: bool) -> None:
   print()
   total_num_rows = 0
   for d in datasets_to_load:
-    num_rows = get_dataset(d.namespace, d.name).select_rows([UUID_COLUMN], limit=1).total_num_rows
+    dataset = DatasetDuckDB(d.namespace, d.name)
+    num_rows = dataset.select_rows([UUID_COLUMN], limit=1).total_num_rows
     print(f'{d.namespace}/{d.name} loaded with {num_rows:,} rows.')
-    gc.collect()
+
+    # Free up RAM.
+    del dataset
+
     total_num_rows += num_rows
 
   print(f'Done loading {len(datasets_to_load)} datasets with {total_num_rows:,} rows.')
@@ -127,13 +135,15 @@ def load(output_dir: str, config_path: str, overwrite: bool) -> None:
   print('*** Dataset settings ***')
   for d in config.datasets:
     if d.settings:
-      dataset = get_dataset(d.namespace, d.name)
+      dataset = DatasetDuckDB(d.namespace, d.name)
       dataset.update_settings(d.settings)
 
   print()
   print('*** Compute embeddings ***')
   with DebugTimer('Loading embeddings'):
     for d in config.datasets:
+      dataset = DatasetDuckDB(d.namespace, d.name)
+
       # If embeddings are explicitly set, use only those.
       embeddings = d.embeddings or []
       # If embeddings are not explicitly set, use the media paths and preferred embedding from
@@ -145,15 +155,25 @@ def load(output_dir: str, config_path: str, overwrite: bool) -> None:
               embeddings.append(
                 EmbeddingConfig(path=path, embedding=d.settings.preferred_embedding))
       for e in embeddings:
-        task_id = task_manager.task_id(f'Compute embedding {e.embedding} on {e.path}')
-        task_manager.execute(task_id, _compute_embedding, d.namespace, d.name, e, output_dir,
-                             overwrite, (task_id, 0))
-    task_manager.wait()
+        if e not in dataset.config().embeddings:
+          print('scheduling', e)
+          task_id = task_manager.task_id(f'Compute embedding {e.embedding} on {d.name}:{e.path}')
+          task_manager.execute(task_id, _compute_embedding, d.namespace, d.name, e, output_dir,
+                               overwrite, (task_id, 0))
+        else:
+          print(f'Embedding {e.embedding} already exists for {d.name}:{e.path}. Skipping.')
+
+      del dataset
+
+      # Wait for all embeddings for each dataset to reduce the memory pressure.
+      task_manager.wait()
 
   print()
   print('*** Compute signals ***')
   with DebugTimer('Computing signals'):
     for d in config.datasets:
+      dataset = DatasetDuckDB(d.namespace, d.name)
+
       # If signals are explicitly set, use only those.
       signals = d.signals or []
       # If signals are not explicitly set, use the media paths and config.signals.
@@ -163,11 +183,25 @@ def load(output_dir: str, config_path: str, overwrite: bool) -> None:
             for signal in config.signals or []:
               signals.append(SignalConfig(path=path, signal=signal))
 
+      # Separate signals by path to avoid computing the same signal in parallel, which can cause
+      # issues with taking too much RAM.
+      path_signals: dict[PathTuple, list[SignalConfig]] = {}
       for s in signals:
-        task_id = task_manager.task_id(f'Compute signal {s.signal} on {s.path}')
-        task_manager.execute(task_id, _compute_signal, d.namespace, d.name, s, output_dir,
-                             overwrite, (task_id, 0))
-    task_manager.wait()
+        path_signals.setdefault(s.path, []).append(s)
+
+      for path, signals in path_signals.items():
+        for s in signals:
+          if s not in dataset.config().signals:
+            task_id = task_manager.task_id(f'Compute signal {s.signal} on {d.name}:{s.path}')
+            task_manager.execute(task_id, _compute_signal, d.namespace, d.name, s, output_dir,
+                                 overwrite, (task_id, 0))
+          else:
+            print(f'Signal {s.signal} already exists for {d.name}:{s.path}. Skipping.')
+
+        # Wait for all signals for each path to reduce the memory pressure.
+        task_manager.wait()
+
+      del dataset
 
   print()
   print('Done!')
@@ -179,6 +213,8 @@ def load(output_dir: str, config_path: str, overwrite: bool) -> None:
 def _compute_signal(namespace: str, name: str, signal_config: SignalConfig, output_dir: str,
                     overwrite: bool, task_step_id: TaskStepId) -> None:
   os.environ['LILAC_DATA_PATH'] = output_dir
+  os.environ['DUCKDB_USE_VIEWS'] = '1'
+
   # Turn off debug logging.
   if 'DEBUG' in os.environ:
     del os.environ['DEBUG']
@@ -197,12 +233,17 @@ def _compute_signal(namespace: str, name: str, signal_config: SignalConfig, outp
   if compute_signal:
     dataset.compute_signal(signal_config.signal, signal_config.path, task_step_id)
 
+  # Free up RAM.
+  remove_dataset_from_cache(namespace, name)
+  del dataset
   gc.collect()
 
 
 def _compute_embedding(namespace: str, name: str, embedding_config: EmbeddingConfig,
                        output_dir: str, overwrite: bool, task_step_id: TaskStepId) -> None:
   os.environ['LILAC_DATA_PATH'] = output_dir
+  os.environ['DUCKDB_USE_VIEWS'] = '1'
+
   # Turn off debug logging.
   if 'DEBUG' in os.environ:
     del os.environ['DEBUG']
@@ -212,6 +253,7 @@ def _compute_embedding(namespace: str, name: str, embedding_config: EmbeddingCon
     compute_embedding = True
 
   dataset = get_dataset(namespace, name)
+
   if not compute_embedding:
     field = dataset.manifest().data_schema.get_field(embedding_config.path)
     embedding_field = (field.fields or {}).get(embedding_config.embedding)
@@ -221,6 +263,8 @@ def _compute_embedding(namespace: str, name: str, embedding_config: EmbeddingCon
   if compute_embedding:
     dataset.compute_embedding(embedding_config.embedding, embedding_config.path, task_step_id)
 
+  remove_dataset_from_cache(namespace, name)
+  del dataset
   gc.collect()
 
 
