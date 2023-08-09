@@ -69,7 +69,7 @@ Details can be found at [Managing Spaces with Github Actions](https://huggingfac
 1. Deploy to your HuggingFace Space:
 
    ```
-   poetry run deploy-hf \
+   poetry run python -m scripts.deploy_hf \
      --dataset=$DATASET_NAMESPACE/$DATASET_NAME
 
    # --concept is optional. By default all lilac/* concepts are uploaded. This flag enables uploading other concepts from local.
@@ -153,7 +153,8 @@ poetry run lilac load \
 ```
 
 NOTE: You must have a config JSON or YAML file that represents your dataset configuration. The config
-should be an instance of the pydantic class `lilac.Config`.
+should be an instance of the pydantic class `lilac.Config` (for multiple datasets) or
+`lilac.DatasetConfig` (for a single dataset).
 
 ### Tips
 

@@ -1,16 +1,18 @@
 """Router for the dataset database."""
-from typing import Annotated, Optional, Sequence, Union, cast
+from typing import Annotated, Literal, Optional, Sequence, Union, cast
 from urllib.parse import unquote
 
+import yaml
 from fastapi import APIRouter, HTTPException, Response
 from fastapi.params import Depends
 from fastapi.responses import ORJSONResponse
 from pydantic import BaseModel, validator
 
 from .auth import UserInfo, get_session_user, get_user_access
+from .config import DatasetSettings
 from .data.dataset import BinaryOp
 from .data.dataset import Column as DBColumn
-from .data.dataset import DatasetManifest, DatasetSettings, FeatureListValue, FeatureValue
+from .data.dataset import DatasetManifest, FeatureListValue, FeatureValue
 from .data.dataset import Filter as PyFilter
 from .data.dataset import (
   GroupsSortBy,
@@ -285,16 +287,28 @@ def get_media(namespace: str, dataset_name: str, item_id: str, leaf_path: str) -
   return Response(content=result.data)
 
 
+@router.get('/{namespace}/{dataset_name}/config')
+def get_config(namespace: str, dataset_name: str,
+               format: Union[Literal['yaml'], Literal['json']]) -> Union[str, dict]:
+  """Get the config for the dataset."""
+  dataset = get_dataset(namespace, dataset_name)
+  config_dict = dataset.config().dict(exclude_defaults=True, exclude_none=True)
+  if format == 'yaml':
+    return yaml.dump(config_dict)
+  elif format == 'json':
+    return config_dict
+
+
 @router.get('/{namespace}/{dataset_name}/settings')
 def get_settings(namespace: str, dataset_name: str) -> DatasetSettings:
-  """Get the media for the dataset."""
+  """Get the settings for the dataset."""
   dataset = get_dataset(namespace, dataset_name)
   return dataset.settings()
 
 
 @router.post('/{namespace}/{dataset_name}/settings', response_model_exclude_none=True)
 def update_settings(namespace: str, dataset_name: str, settings: DatasetSettings) -> None:
-  """Get the media for the dataset."""
+  """Update settings for the dataset."""
   if not get_user_access().dataset.compute_signals:
     raise HTTPException(401, 'User does not have access to update the settings of this dataset.')
 

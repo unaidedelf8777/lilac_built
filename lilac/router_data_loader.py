@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from .auth import get_user_access
+from .config import DatasetConfig
 from .data_loader import process_source
 from .env import data_path
 from .router_utils import RouteErrorHandler
@@ -46,6 +47,8 @@ def get_sources() -> SourcesList:
 def get_source_schema(source_name: str) -> dict[str, Any]:
   """Get the fields for a source."""
   source_cls = get_source_cls(source_name)
+  if source_cls is None:
+    raise ValueError(f'Unknown source: {source_name}')
   return source_cls.schema()
 
 
@@ -69,12 +72,16 @@ async def load(source_name: str, options: LoadDatasetOptions,
     raise HTTPException(401, 'User does not have access to load a dataset.')
 
   source_cls = get_source_cls(source_name)
+  if source_cls is None:
+    raise ValueError(f'Unknown source: {source_name}')
   source = source_cls(**options.config)
 
   task_id = task_manager().task_id(
     name=f'[{options.namespace}/{options.dataset_name}] Load dataset',
     description=f'Loader: {source.name}. \n Config: {source}')
-  task_manager().execute(task_id, process_source, data_path(), options.namespace,
-                         options.dataset_name, source, (task_id, 0))
+  task_manager().execute(
+    task_id, process_source, data_path(),
+    DatasetConfig(namespace=options.namespace, name=options.dataset_name, source=source),
+    (task_id, 0))
 
   return LoadDatasetResponse(task_id=task_id)
