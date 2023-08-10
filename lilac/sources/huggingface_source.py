@@ -102,6 +102,10 @@ class HuggingFaceDataset(Source):
     title='Dataset config name', description='Some datasets require this.', default=None)
   split: Optional[str] = PydanticField(
     title='Dataset split', description='Loads all splits by default.', default=None)
+  sample_size: Optional[int] = PydanticField(
+    title='Sample size',
+    description='Number of rows to sample from the dataset, for each split.',
+    default=None)
   revision: Optional[str] = PydanticField(title='Dataset revision', default=None)
   load_from_disk: Optional[bool] = PydanticField(
     description='Load from local disk instead of the hub.', default=False)
@@ -138,6 +142,8 @@ class HuggingFaceDataset(Source):
 
     for split_name in split_names:
       split_dataset = self._dataset_dict[split_name]
+      if self.sample_size:
+        split_dataset = split_dataset.select(range(self.sample_size))
 
       for example in split_dataset:
         # Replace the class labels with strings.
