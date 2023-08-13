@@ -108,10 +108,9 @@ __rowid__: string
 Note that `question.pii.emails` is a list of `string_span` values. These are objects with `start`
 and `end` indices that point to the location of the email in the original `question` text.
 
-Let's query 5 rows that have emails in the `response` field via
-[`Dataset.select_rows`](#lilac.data.Dataset.select_rows), a python API that is analogous to a
-`SQL Select` statement. We do this by adding an [`exists`](#lilac.data.Filter.op) filter on
-`response.pii.emails` to make sure it's not empty:
+Let's query 5 rows that have emails in the `response` field via [](#Dataset.select_rows), a python
+API that is analogous to a `SQL Select` statement. We do this by adding an [`exists`](#Filter.op)
+filter on `response.pii.emails` to make sure it's not empty:
 
 ```py
 df_with_emails = dataset.select_rows(
@@ -132,7 +131,7 @@ Output:
 4    niv.204253  In this task, you are asked to translate an En...  [{'__value__': {'start': 322, 'end': 341}}, {'...
 ```
 
-For more information on querying, see [`Dataset.select_rows`](#lilac.data.Dataset.select_rows).
+For more information on querying, see [](#Dataset.select_rows).
 
 ### Profanity detection
 
@@ -161,26 +160,58 @@ Computing signal "gte-small" on local/open-orca-100k:('response',) took 1079.260
 Now we can preview the top 5 responses based on their profanity concept score:
 
 ```py
-query = ll.ConceptQuery(concept_namespace='lilac', concept_name='profanity', embedding='gte-small')
-r = dataset.select_rows(['overview'], searches=[ll.Search(path='overview', query=query)], limit=5)
+search = ll.ConceptSearch(path='response', concept_namespace='lilac', concept_name='profanity', embedding='gte-small')
+r = dataset.select_rows(['response'], searches=[search], limit=5)
 print(r.df())
 ```
 
-Output:
+Output (the response text is removed due to sensitive content):
 
-TODO: Fix concept not found.
+```
+                                            response  ...                lilac/profanity/gte-small(response)
+0                                  *****************  ...  [{'__value__': {'start': 0, 'end': 17}, 'score...
+1                                  *****************  ...  [{'__value__': {'start': 0, 'end': 6}, 'score'...
+2                                  *****************  ...  [{'__value__': {'start': 0, 'end': 143}, 'scor...
+3                                  *****************  ...  [{'__value__': {'start': 0, 'end': 79}, 'score...
+4                                  *****************  ...  [{'__value__': {'start': 0, 'end': 376}, 'scor...
+```
 
 To compute the concept score over the entire dataset, we do:
 
 ```py
-dataset.compute_signal(
-    ll.ConceptSignal(namespace='lilac',
-                          concept_name='profanity',
-                          embedding='gte-small'), 'response')
+dataset.compute_concept('lilac', 'profanity', embedding='gte-small', path='response')
 ```
 
-TODO: Fix concept not found.
+Output:
+
+```sh
+Computing lilac/profanity/gte-small on local/open-orca-100k:('response',): 100%|█████████████████████████████████▉| 100000/100000 [00:10<00:00, 9658.80it/s]
+Wrote signal output to ./data/datasets/local/open-orca-100k/response/lilac/profanity/gte-small/v34
+```
 
 ## Download
 
-TODO
+Now that we’ve enriched the dataset, let’s download it so we can continue our work in a Python
+notebook, or any other language. [](#Dataset.to_pandas) will create a DataFrame in memory. For other
+formats see the other `.to_*()`[](#Dataset) methods. If you want to download only a subset of the
+dataset, you can use the `columns` argument.
+
+```py
+df = dataset.to_pandas()
+df.info()
+```
+
+Output:
+
+```
+ #   Column                                   Non-Null Count   Dtype
+---  ------                                   --------------   -----
+ 0   id                                       100000 non-null  object
+ 1   system_prompt                            100000 non-null  object
+ 2   question                                 100000 non-null  object
+ 3   response                                 100000 non-null  object
+ 4   __hfsplit__                              100000 non-null  object
+ 5   response.pii                             100000 non-null  object
+ 6   response.lilac/profanity/gte-small/v34   100000 non-null  object
+ 7   question.pii                             100000 non-null  object
+```
