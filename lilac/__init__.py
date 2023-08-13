@@ -1,5 +1,6 @@
 from importlib import metadata
 
+from .concepts import *  # noqa: F403
 from .config import DatasetConfig, DatasetSettings, EmbeddingConfig, SignalConfig
 from .data import *  # noqa: F403
 from .data.dataset_duckdb import DatasetDuckDB

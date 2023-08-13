@@ -21,7 +21,7 @@ from ..schema import (
   lilac_span,
   schema,
 )
-from ..signals.signal import (
+from ..signal import (
   TextEmbeddingSignal,
   TextSignal,
   TextSplitterSignal,
