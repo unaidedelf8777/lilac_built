@@ -90,16 +90,18 @@ def deploy_hf(hf_username: Optional[str], hf_space: Optional[str], datasets: lis
   shutil.copytree('lilac', os.path.join(repo_basedir, 'lilac'), dirs_exist_ok=True)
 
   # Copy a subset of root files.
-  copy_files = ['.dockerignore', '.env', 'Dockerfile', 'LICENSE']
+  copy_files = [
+    '.dockerignore', '.env', 'Dockerfile', 'LICENSE', 'docker_start.sh', 'docker_start.py'
+  ]
   for copy_file in copy_files:
     shutil.copyfile(copy_file, os.path.join(repo_basedir, copy_file))
 
   # Create an .env.local to set HF-specific flags.
   with open(f'{repo_basedir}/.env.demo', 'w') as f:
     f.write("""LILAC_DATA_PATH='/data'
-HF_HOME='/data/.huggingface'
-TRANSFORMERS_CACHE='/data/.cache'
-XDG_CACHE_HOME='/data/.cache'
+HF_HOME=/data/.huggingface
+TRANSFORMERS_CACHE=/data/.cache
+XDG_CACHE_HOME=/data/.cache
 """)
 
   # Create a .gitignore to avoid uploading unnecessary files.
@@ -130,9 +132,10 @@ app_port: 5432
 
   # Upload the cache files.
   hf_api = HfApi()
-  if not skip_cache:
+  cache_dir = get_lilac_cache_dir(data_dir)
+  if not skip_cache and os.path.exists(cache_dir):
     hf_api.upload_folder(
-      folder_path=get_lilac_cache_dir(data_dir),
+      folder_path=cache_dir,
       path_in_repo=get_lilac_cache_dir('data'),
       repo_id=hf_space,
       repo_type='space',
