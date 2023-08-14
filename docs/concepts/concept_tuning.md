@@ -1,5 +1,9 @@
 # Tuning a concept
 
+```{tip}
+[Try Lilac concepts on HuggingFace](https://huggingface.co/spaces/lilacai/lilac)
+```
+
 Often times, after creating a concept or using an off-the-shelf-concept, the concept needs to be
 tuned to fit shape of your data (often called the "distribution" of your data).
 
@@ -41,7 +45,7 @@ You can use this labeler to quickly tune your concept.
 
 ## Tune from Python
 
-Tuning from Python looks very similar to [Creating a concept](concept_create#create-from-python).
+Tuning from Python looks very similar to [Creating a concept](concept_create.md#create-from-python).
 
 You can list examples in a concept by using the [](DiskConceptDB.get) method.
 
