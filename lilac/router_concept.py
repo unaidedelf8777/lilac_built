@@ -8,11 +8,18 @@ from openai_function_call import OpenAISchema
 from pydantic import BaseModel, Field
 
 from .auth import UserInfo, get_session_user
-from .concepts.concept import DRAFT_MAIN, Concept, ConceptMetrics, DraftId, draft_examples
+from .concepts.concept import (
+  DRAFT_MAIN,
+  Concept,
+  ConceptMetrics,
+  ConceptType,
+  DraftId,
+  draft_examples,
+)
 from .concepts.db_concept import DISK_CONCEPT_DB, DISK_CONCEPT_MODEL_DB, ConceptInfo, ConceptUpdate
 from .env import env
 from .router_utils import RouteErrorHandler, server_compute_concept
-from .schema import RichData, SignalInputType
+from .schema import RichData
 from .signals.concept_scorer import ConceptSignal
 
 router = APIRouter(route_class=RouteErrorHandler)
@@ -50,7 +57,7 @@ class CreateConceptOptions(BaseModel):
   # Name of the concept.
   name: str
   # Input type (modality) of the concept.
-  type: SignalInputType
+  type: ConceptType
   description: Optional[str] = None
 
 
@@ -140,18 +147,24 @@ def get_concept_models(
 
 @router.get('/{namespace}/{concept_name}/model/{embedding_name}')
 def get_concept_model(
-    namespace: str,
-    concept_name: str,
-    embedding_name: str,
-    user: Annotated[Optional[UserInfo], Depends(get_session_user)] = None) -> ConceptModelInfo:
+  namespace: str,
+  concept_name: str,
+  embedding_name: str,
+  create_if_not_exists: bool = False,
+  user: Annotated[Optional[UserInfo], Depends(get_session_user)] = None
+) -> Optional[ConceptModelInfo]:
   """Get a concept model from a database."""
   concept = DISK_CONCEPT_DB.get(namespace, concept_name, user)
   if not concept:
     raise HTTPException(
       status_code=404, detail=f'Concept "{namespace}/{concept_name}" was not found')
 
+  model = DISK_CONCEPT_MODEL_DB.get(namespace, concept_name, embedding_name, user)
+  if not model and not create_if_not_exists:
+    return None
+
   model = DISK_CONCEPT_MODEL_DB.sync(
-    namespace, concept_name, embedding_name, user=user, create=True)
+    namespace, concept_name, embedding_name, user=user, create=create_if_not_exists)
   model_info = ConceptModelInfo(
     namespace=model.namespace,
     concept_name=model.concept_name,
