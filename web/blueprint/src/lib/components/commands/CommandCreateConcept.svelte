@@ -34,8 +34,8 @@
   $: authEnabled = $authInfo.data?.auth_enabled;
   $: userId = $authInfo.data?.user?.id;
 
-  $: defaultNamespace = (authEnabled ? userId : null) || 'local';
-  $: namespace = command.namespace || defaultNamespace;
+  $: defaultNamespace = command.namespace || (authEnabled ? userId : null);
+  let namespace = defaultNamespace || 'local';
   $: dataset = command.dataset;
   $: datasetId = dataset ? `${dataset.namespace}/${dataset.name}` : '';
   $: path = command.path;
@@ -176,7 +176,11 @@
         -->
             <TextInput labelText="namespace" disabled />
           {:else}
-            <TextInput labelText="namespace" bind:value={namespace} />
+            <TextInput
+              labelText="namespace"
+              value={defaultNamespace}
+              on:change={e => (namespace = (e.detail || '').toString())}
+            />
           {/if}
           <TextInput labelText="name" bind:value={name} required />
         </div>
