@@ -2,13 +2,14 @@
 
 import os
 import shutil
+from typing import TypedDict
 
+import yaml
 from huggingface_hub import scan_cache_dir, snapshot_download
 
 from lilac.concepts.db_concept import CONCEPTS_DIR, DiskConceptDB, get_concept_output_dir
-from lilac.db_manager import list_datasets
 from lilac.env import data_path, env
-from lilac.utils import get_dataset_output_dir, get_lilac_cache_dir, log
+from lilac.utils import get_datasets_dir, get_lilac_cache_dir, log
 
 
 def delete_old_files() -> None:
@@ -33,6 +34,16 @@ def delete_old_files() -> None:
   strategy.execute()
 
 
+class HfSpaceConfig(TypedDict):
+  """The huggingface space config, defined in README.md.
+
+  See:
+  https://huggingface.co/docs/hub/spaces-config-reference
+  """
+  title: str
+  datasets: list[str]
+
+
 def main() -> None:
   """Download dataset files from the HF space that was uploaded before building the image."""
   # SPACE_ID is the HuggingFace Space ID environment variable that is automatically set by HF.
@@ -41,21 +52,26 @@ def main() -> None:
     return
 
   delete_old_files()
+
+  with open(os.path.abspath('README.md')) as f:
+    # Strip the '---' for the huggingface readme config.
+    readme = f.read().strip('---')
+    hf_config: HfSpaceConfig = yaml.safe_load(readme)
+
   # Download the huggingface space data. This includes code and datasets, so we move the datasets
   # alone to the data directory.
+  for lilac_hf_dataset in hf_config['datasets']:
+    print('Downloading dataset from HuggingFace: ', lilac_hf_dataset)
+    snapshot_download(
+      repo_id=lilac_hf_dataset,
+      repo_type='dataset',
+      token=env('HF_ACCESS_TOKEN'),
+      local_dir=get_datasets_dir(data_path()),
+      ignore_patterns=['.gitattributes', 'README.md'])
+
   snapshot_dir = snapshot_download(repo_id=repo_id, repo_type='space', token=env('HF_ACCESS_TOKEN'))
   # Copy datasets.
   spaces_data_dir = os.path.join(snapshot_dir, 'data')
-  datasets = list_datasets(spaces_data_dir)
-  for dataset in datasets:
-    spaces_dataset_output_dir = get_dataset_output_dir(spaces_data_dir, dataset.namespace,
-                                                       dataset.dataset_name)
-    persistent_output_dir = get_dataset_output_dir(data_path(), dataset.namespace,
-                                                   dataset.dataset_name)
-    # Huggingface doesn't let you selectively download files so we just copy the data directory
-    # out of the cloned space.
-    shutil.rmtree(persistent_output_dir, ignore_errors=True)
-    shutil.copytree(spaces_dataset_output_dir, persistent_output_dir)
 
   # Delete cache files from persistent storage.
   cache_dir = get_lilac_cache_dir(data_path())
