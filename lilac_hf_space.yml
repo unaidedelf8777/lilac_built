@@ -112,7 +112,7 @@ datasets:
       dataset_name: Open-Orca/OpenOrca
       sample_size: 100000
 
-  - name: opus100-en-us-validation
+  - name: opus100-en-es-validation
     namespace: lilac
     tags: [machine-learning]
     settings:
@@ -182,6 +182,21 @@ datasets:
       dataset_name: EleutherAI/pile
       sample_size: 100000
       source_name: huggingface
+
+  # Other datasets.
+  - name: the_movies_dataset
+    namespace: lilac
+    tags: [other]
+    settings:
+      ui:
+        media_paths: [overview]
+      preferred_embedding: 'gte-small'
+    source:
+      filepaths:
+        [
+          'https://storage.googleapis.com/lilac-data/datasets/the_movies_dataset/the_movies_dataset.csv'
+        ]
+      source_name: csv
 
 signals:
   - signal_name: pii
