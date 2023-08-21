@@ -4,6 +4,14 @@ Welcome to Lilac
 .. include:: welcome.md
    :parser: myst_parser.sphinx_
 
+.. toctree::
+   :caption: Blog posts
+   :hidden:
+   :maxdepth: 1
+   :glob:
+
+   blog/*
+
 
 .. toctree::
    :caption: Getting Started
