@@ -9,13 +9,28 @@
   import {getSettingsContext} from '$lib/stores/settingsStore';
   import {
     conceptDisplayName,
+    displayPath,
     getComputedEmbeddings,
     getSearchEmbedding,
     getSearchPath,
     getSearches,
-    getSortedConcepts
+    getSortedConcepts,
+    shortFieldName
   } from '$lib/view_utils';
-  import {deserializePath, serializePath, type Path} from '$lilac';
+  import {
+    childFields,
+    deserializePath,
+    getSignalInfo,
+    isNumeric,
+    pathIncludes,
+    serializePath,
+    type LilacSchema,
+    type Op,
+    type Path,
+    type SignalInfoWithTypedSchema,
+    type StatsResult,
+    type UnaryFilter
+  } from '$lilac';
   import {Button, ComboBox, InlineLoading, Select, SelectItem, Tag} from 'carbon-components-svelte';
   import {Add, Checkmark, Chip, SearchAdvanced} from 'carbon-icons-svelte';
   import {Command, triggerCommand} from '../commands/Commands.svelte';
@@ -32,6 +47,74 @@
   $: searchPath = getSearchPath($datasetViewStore, $datasetStore);
 
   $: searches = getSearches($datasetViewStore, searchPath);
+
+  function getFieldSearchItems(
+    stats: StatsResult[] | null,
+    schema: LilacSchema | null,
+    embeddings: SignalInfoWithTypedSchema[] | undefined
+  ): SearchItem[] {
+    if (schema == null || stats == null || searchPath == null) {
+      return [];
+    }
+    const allFields = schema ? childFields(schema) : [];
+    const items: SearchItem[] = [];
+    for (const field of allFields) {
+      if (field.dtype == null) {
+        // Ignore non-pedals.
+        continue;
+      }
+      if (field.dtype === 'embedding' || field.dtype === 'binary') {
+        // Ignore special dtypes.
+        continue;
+      }
+      if (!pathIncludes(field.path, searchPath)) {
+        // Ignore any fields unrelated to the current search path.
+        continue;
+      }
+      const signal = getSignalInfo(field);
+      if (signal?.signal_name === 'concept_score') {
+        // Ignore any concept scores since they are handled seperately via preview.
+        continue;
+      }
+      const isEmbedding = embeddings?.some(e => e.name === signal?.signal_name);
+      if (isEmbedding) {
+        // Ignore any embeddings since they are special "index" fields.
+        continue;
+      }
+      const shortName = shortFieldName(field.path);
+      const text = displayPath(field.path.slice(searchPath.length));
+      // Suggest sorting for numeric fields.
+      if (isNumeric(field.dtype)) {
+        items.push({
+          id: {type: 'field', path: field.path, sort: 'DESC', isSignal: signal != null} as FieldId,
+          text,
+          description: `Sort descending by ${shortName}`
+        });
+        continue;
+      }
+
+      // Suggest "exists" for signal string fields such as PII.
+      if (field.dtype === 'string' || field.dtype === 'string_span') {
+        if (signal == null) {
+          // Skip filtering source fields by EXISTS.
+          continue;
+        }
+        items.push({
+          id: {type: 'field', path: field.path, op: 'exists', isSignal: signal != null} as FieldId,
+          text,
+          description: `Find documents with ${shortName}`
+        });
+        continue;
+      }
+    }
+    return items;
+  }
+
+  $: fieldSearchItems = getFieldSearchItems(
+    $datasetStore.stats,
+    $datasetStore.schema,
+    $embeddings.data
+  );
 
   const signalMutation = computeSignalMutation();
 
@@ -65,8 +148,8 @@
     !isEmbeddingComputed && isWaitingForIndexing[indexingKey(searchPath, selectedEmbedding)];
 
   $: placeholderText = isEmbeddingComputed
-    ? 'Search by concept or keyword.'
-    : 'Search by keyword. Click "compute embedding" to search by concept.';
+    ? 'Search by keyword, field or concept.'
+    : 'Search by keyword or field. Compute embedding to enable concept search.';
 
   const concepts = queryConcepts();
   const authInfo = queryAuthInfo();
@@ -74,18 +157,26 @@
 
   $: namespaceConcepts = getSortedConcepts($concepts.data || [], userId);
   interface ConceptId {
+    type: 'concept';
     namespace: string;
     name: string;
   }
-  interface SearchSelectItem {
-    id: ConceptId | 'new-concept' | 'keyword-search' | 'semantic-search';
+  interface FieldId {
+    type: 'field';
+    path: Path;
+    isSignal: boolean;
+    op?: Op;
+    sort?: 'ASC' | 'DESC';
+  }
+  interface SearchItem {
+    id: ConceptId | FieldId | 'new-concept' | 'keyword-search' | 'semantic-search';
     text: string;
     description?: string;
   }
-  let conceptSelectItems: SearchSelectItem[] = [];
+  let searchItems: SearchItem[] = [];
 
   let searchText = '';
-  let newConceptItem: SearchSelectItem;
+  let newConceptItem: SearchItem;
   $: newConceptItem = {
     id: 'new-concept',
     text: searchText,
@@ -94,20 +185,21 @@
   $: keywordSearchItem = {
     id: 'keyword-search',
     text: searchText
-  } as SearchSelectItem;
+  } as SearchItem;
   $: semanticSearchItem = {
     id: 'semantic-search',
     text: searchText,
     disabled: !isEmbeddingComputed
-  } as SearchSelectItem;
-  $: conceptSelectItems = $concepts?.data
+  } as SearchItem;
+  $: searchItems = $concepts?.data
     ? [
-        newConceptItem,
         ...(searchText != '' ? [keywordSearchItem] : []),
         ...(searchText != '' && selectedEmbedding ? [semanticSearchItem] : []),
+        newConceptItem,
+        ...fieldSearchItems,
         ...namespaceConcepts.flatMap(namespaceConcept =>
           namespaceConcept.concepts.map(c => ({
-            id: {namespace: c.namespace, name: c.name},
+            id: {namespace: c.namespace, name: c.name, type: 'concept'} as ConceptId,
             text: conceptDisplayName(c.namespace, c.name, $authInfo.data),
             description: c.description,
             disabled:
@@ -157,8 +249,8 @@
 
   const selectSearchItem = (
     e: CustomEvent<{
-      selectedId: SearchSelectItem['id'];
-      selectedItem: SearchSelectItem;
+      selectedId: SearchItem['id'];
+      selectedItem: SearchItem;
     }>
   ) => {
     if (searchPath == null) return;
@@ -180,7 +272,6 @@
         path: searchPath,
         onCreate: e => searchConcept(e.detail.namespace, e.detail.name)
       });
-      conceptComboBox.clear();
     } else if (e.detail.selectedId === 'keyword-search') {
       if (searchText == '') {
         return;
@@ -190,7 +281,6 @@
         type: 'keyword',
         query: searchText
       });
-      conceptComboBox.clear();
     } else if (e.detail.selectedId == 'semantic-search') {
       if (searchText == '' || selectedEmbedding == null) {
         return;
@@ -201,10 +291,25 @@
         query: searchText,
         embedding: selectedEmbedding
       });
-      conceptComboBox.clear();
-    } else {
+    } else if (e.detail.selectedId.type === 'concept') {
       searchConcept(e.detail.selectedId.namespace, e.detail.selectedId.name);
+    } else if (e.detail.selectedId.type === 'field') {
+      const searchItem = e.detail.selectedId as FieldId;
+      if (searchItem.sort != null) {
+        datasetViewStore.setSortBy(searchItem.path);
+        datasetViewStore.setSortOrder(searchItem.sort);
+      } else if (searchItem.op != null) {
+        datasetViewStore.addFilter({
+          path: searchItem.path,
+          op: searchItem.op
+        } as UnaryFilter);
+      } else {
+        throw new Error(`Unknown search type ${e.detail.selectedId}`);
+      }
+    } else {
+      throw new Error(`Unknown search type ${e.detail.selectedId}`);
     }
+    conceptComboBox.clear();
   };
 
   const selectField = (e: Event) => {
@@ -234,7 +339,7 @@
             <ComboBox
               size="xl"
               bind:this={conceptComboBox}
-              items={conceptSelectItems}
+              items={searchItems}
               bind:value={searchText}
               on:select={selectSearchItem}
               shouldFilterItem={(item, value) =>
@@ -242,7 +347,14 @@
               placeholder={placeholderText}
               let:item={it}
             >
-              {@const item = conceptSelectItems.find(p => p.id === it.id)}
+              {@const item = searchItems.find(p => p.id === it.id)}
+              {@const isSignal =
+                item != null &&
+                typeof item.id === 'object' &&
+                item.id.type === 'field' &&
+                item.id.isSignal}
+              {@const isConcept =
+                item != null && typeof item.id === 'object' && item.id.type === 'concept'}
               {#if item == null}
                 <div />
               {:else if item.id === 'new-concept'}
@@ -270,7 +382,7 @@
                   </div>
                 </div>
               {:else}
-                <div class="flex justify-between gap-x-4">
+                <div class="flex justify-between gap-x-8" class:isSignal class:isConcept>
                   <div>{item.text}</div>
                   {#if item.description}
                     <div class="truncate text-xs text-gray-500">{item.description}</div>
@@ -333,5 +445,13 @@
   }
   :global(.new-concept, .new-keyword) {
     @apply h-full;
+  }
+
+  /* Style the combobox item's parent div with a background color depending on type of search. */
+  :global(.bx--list-box__menu-item:not(.bx--list-box__menu-item--highlighted):has(.isSignal)) {
+    @apply bg-blue-50;
+  }
+  :global(.bx--list-box__menu-item:not(.bx--list-box__menu-item--highlighted):has(.isConcept)) {
+    @apply bg-emerald-100;
   }
 </style>

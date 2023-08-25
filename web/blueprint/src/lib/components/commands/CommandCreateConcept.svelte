@@ -56,7 +56,7 @@
   $: schema = schemaQuery && $schemaQuery?.data;
 
   $: stringFields = schema
-    ? childFields(schema).filter(f => f.dtype === 'string' && !isSignalField(f, schema!))
+    ? childFields(schema).filter(f => f.dtype === 'string' && !isSignalField(f))
     : [];
   $: fields = stringFields.sort((a, b) => {
     const aIsIndexed = childFields(a).some(
@@ -80,7 +80,7 @@
   $: {
     // Auto-select the first path.
     if (fields && fields.length > 0 && path === undefined) {
-      path = deserializePath(fields[0].path);
+      path = fields[0].path;
     }
   }
 
