@@ -11,8 +11,8 @@
     conceptDisplayName,
     displayPath,
     getComputedEmbeddings,
+    getDefaultSearchPath,
     getSearchEmbedding,
-    getSearchPath,
     getSearches,
     getSortedConcepts,
     shortFieldName
@@ -31,24 +31,33 @@
     type StatsResult,
     type UnaryFilter
   } from '$lilac';
-  import {Button, ComboBox, InlineLoading, Select, SelectItem, Tag} from 'carbon-components-svelte';
-  import {Add, Checkmark, Chip, SearchAdvanced} from 'carbon-icons-svelte';
+  import {ComboBox, Dropdown, Tag} from 'carbon-components-svelte';
+  import {Add, AssemblyCluster, Chip, Search, SearchAdvanced} from 'carbon-icons-svelte';
   import {Command, triggerCommand} from '../commands/Commands.svelte';
   import {hoverTooltip} from '../common/HoverTooltip';
 
   const datasetViewStore = getDatasetViewContext();
   const datasetStore = getDatasetContext();
   const appSettings = getSettingsContext();
-  $: datasetSettings = querySettings($datasetViewStore.namespace, $datasetViewStore.datasetName);
+  $: settings = querySettings($datasetViewStore.namespace, $datasetViewStore.datasetName);
 
   $: namespace = $datasetViewStore.namespace;
   $: datasetName = $datasetViewStore.datasetName;
 
-  $: searchPath = getSearchPath($datasetViewStore, $datasetStore);
+  let searchPath: Path | undefined;
+
+  $: mediaPaths = $settings.data?.ui?.media_paths?.map(p => (Array.isArray(p) ? p : [p]));
+
+  $: {
+    if (searchPath == null && mediaPaths != null) {
+      searchPath = getDefaultSearchPath($datasetStore, mediaPaths);
+    }
+  }
 
   $: searches = getSearches($datasetViewStore, searchPath);
 
   function getFieldSearchItems(
+    searchPath: Path | undefined,
     stats: StatsResult[] | null,
     schema: LilacSchema | null,
     embeddings: SignalInfoWithTypedSchema[] | undefined
@@ -111,6 +120,7 @@
   }
 
   $: fieldSearchItems = getFieldSearchItems(
+    searchPath,
     $datasetStore.stats,
     $datasetStore.schema,
     $embeddings.data
@@ -118,18 +128,12 @@
 
   const signalMutation = computeSignalMutation();
 
-  // Only show the visible string fields in the dropdown.
-  $: visibleStringPaths = ($datasetStore.visibleFields || [])
-    .filter(f => f.dtype === 'string')
-    .map(f => serializePath(f.path));
-
   // Get the embeddings.
   const embeddings = queryEmbeddings();
 
   $: selectedEmbedding = getSearchEmbedding(
+    $settings.data,
     $appSettings,
-    $datasetSettings.data,
-    $datasetViewStore,
     $datasetStore,
     searchPath,
     ($embeddings.data || []).map(e => e.name)
@@ -141,7 +145,7 @@
   $: isEmbeddingComputed =
     existingEmbeddings != null && !!existingEmbeddings.includes(selectedEmbedding || '');
 
-  const indexingKey = (path: Path | null, embedding: string | null) =>
+  const indexingKey = (path: Path | undefined, embedding: string | null) =>
     `${serializePath(path || '')}_${embedding}`;
   let isWaitingForIndexing: {[key: string]: boolean} = {};
   $: isIndexing =
@@ -155,7 +159,7 @@
   const authInfo = queryAuthInfo();
   $: userId = $authInfo.data?.user?.id;
 
-  $: namespaceConcepts = getSortedConcepts($concepts.data || [], userId);
+  $: namespaceConcepts = isEmbeddingComputed ? getSortedConcepts($concepts.data || [], userId) : [];
   interface ConceptId {
     type: 'concept';
     namespace: string;
@@ -169,7 +173,13 @@
     sort?: 'ASC' | 'DESC';
   }
   interface SearchItem {
-    id: ConceptId | FieldId | 'new-concept' | 'keyword-search' | 'semantic-search';
+    id:
+      | ConceptId
+      | FieldId
+      | 'new-concept'
+      | 'keyword-search'
+      | 'semantic-search'
+      | 'compute-embedding';
     text: string;
     description?: string;
   }
@@ -179,8 +189,7 @@
   let newConceptItem: SearchItem;
   $: newConceptItem = {
     id: 'new-concept',
-    text: searchText,
-    disabled: !isEmbeddingComputed
+    text: searchText
   };
   $: keywordSearchItem = {
     id: 'keyword-search',
@@ -188,38 +197,38 @@
   } as SearchItem;
   $: semanticSearchItem = {
     id: 'semantic-search',
-    text: searchText,
-    disabled: !isEmbeddingComputed
+    text: searchText
+  } as SearchItem;
+  $: computeEmbeddingItem = {
+    id: 'compute-embedding',
+    text: 'Compute embedding',
+    disabled: isIndexing
   } as SearchItem;
   $: searchItems = $concepts?.data
     ? [
         ...(searchText != '' ? [keywordSearchItem] : []),
-        ...(searchText != '' && selectedEmbedding ? [semanticSearchItem] : []),
-        newConceptItem,
+        ...(searchText != '' && selectedEmbedding && isEmbeddingComputed
+          ? [semanticSearchItem]
+          : []),
+        ...(isEmbeddingComputed ? [newConceptItem] : [computeEmbeddingItem]),
         ...fieldSearchItems,
         ...namespaceConcepts.flatMap(namespaceConcept =>
           namespaceConcept.concepts.map(c => ({
             id: {namespace: c.namespace, name: c.name, type: 'concept'} as ConceptId,
             text: conceptDisplayName(c.namespace, c.name, $authInfo.data),
             description: c.description,
-            disabled:
-              !isEmbeddingComputed ||
-              searches.some(
-                s =>
-                  s.type === 'concept' &&
-                  s.concept_namespace === c.namespace &&
-                  s.concept_name === c.name
-              )
+            disabled: searches.some(
+              s =>
+                s.type === 'concept' &&
+                s.concept_namespace === c.namespace &&
+                s.concept_name === c.name
+            )
           }))
         )
       ]
     : [];
 
-  const selectEmbedding = (e: Event) => {
-    selectedEmbedding = (e.target as HTMLInputElement).value;
-    datasetViewStore.setSearchEmbedding((e.target as HTMLInputElement).value);
-  };
-  const computeEmbedding = () => {
+  function computeEmbedding() {
     if (selectedEmbedding == null) return;
     isWaitingForIndexing[indexingKey(searchPath, selectedEmbedding)] = true;
     $signalMutation.mutate([
@@ -232,9 +241,9 @@
         }
       }
     ]);
-  };
+  }
 
-  let conceptComboBox: ComboBox;
+  let comboBox: ComboBox;
   const searchConcept = (namespace: string, name: string) => {
     if (searchPath == null || selectedEmbedding == null) return;
     datasetViewStore.addSearch({
@@ -244,7 +253,7 @@
       concept_name: name,
       embedding: selectedEmbedding
     });
-    conceptComboBox.clear();
+    comboBox.clear();
   };
 
   const selectSearchItem = (
@@ -291,6 +300,8 @@
         query: searchText,
         embedding: selectedEmbedding
       });
+    } else if (e.detail.selectedId == 'compute-embedding') {
+      computeEmbedding();
     } else if (e.detail.selectedId.type === 'concept') {
       searchConcept(e.detail.selectedId.namespace, e.detail.selectedId.name);
     } else if (e.detail.selectedId.type === 'field') {
@@ -309,125 +320,130 @@
     } else {
       throw new Error(`Unknown search type ${e.detail.selectedId}`);
     }
-    conceptComboBox.clear();
+    comboBox.clear();
+  };
+  const selectField = (e: CustomEvent) => {
+    searchPath = e.detail.selectedItem.path as Path;
   };
 
-  const selectField = (e: Event) => {
-    datasetViewStore.setSearchPath((e.target as HTMLInputElement).value);
-  };
+  let dropdownItems: {id: string; text: string; path: Path; embeddings: string[]}[] = [];
+  $: dropdownItems = (mediaPaths || []).map(p => ({
+    id: serializePath(p),
+    text: displayPath(p),
+    path: p,
+    embeddings: getComputedEmbeddings($datasetStore, p)
+  }));
 </script>
 
-<div class="border-1 flex w-full flex-row items-center">
-  <div class="compute-embedding mr-1" class:compute-embedding-indexing={isIndexing}>
-    <Button
-      disabled={isEmbeddingComputed || isIndexing}
-      iconDescription="Compute embedding index. This may be expensive."
-      on:click={() => {
-        computeEmbedding();
-      }}
-      icon={isEmbeddingComputed ? Checkmark : isIndexing ? InlineLoading : Chip}
-    />
-  </div>
-
-  <!-- Search boxes -->
-  <div class="search-container flex w-full flex-grow flex-row">
-    <div class="w-full">
-      <div class="flex flex-row">
-        <!-- Concept input -->
-        <div class="flex w-full flex-row items-start justify-items-start">
-          <div class="flex-grow">
-            <ComboBox
-              size="xl"
-              bind:this={conceptComboBox}
-              items={searchItems}
-              bind:value={searchText}
-              on:select={selectSearchItem}
-              shouldFilterItem={(item, value) =>
-                item.text.toLowerCase().includes(value.toLowerCase()) || item.id === 'new-concept'}
-              placeholder={placeholderText}
-              let:item={it}
-            >
-              {@const item = searchItems.find(p => p.id === it.id)}
-              {@const isSignal =
-                item != null &&
-                typeof item.id === 'object' &&
-                item.id.type === 'field' &&
-                item.id.isSignal}
-              {@const isConcept =
-                item != null && typeof item.id === 'object' && item.id.type === 'concept'}
-              {#if item == null}
-                <div />
-              {:else if item.id === 'new-concept'}
-                <div class="new-concept flex flex-row items-center justify-items-center">
-                  <Tag><Add /></Tag>
-                  <div class="ml-2">
-                    New concept{searchText != '' ? ':' : ''}
-                    {searchText}
-                  </div>
-                </div>
-              {:else if item.id === 'keyword-search'}
-                <div class="new-keyword flex flex-row items-center justify-items-center">
-                  <Tag><SearchAdvanced /></Tag>
-                  <div class="ml-2">
-                    Keyword search:
-                    {searchText}
-                  </div>
-                </div>
-              {:else if item.id === 'semantic-search'}
-                <div class="new-keyword flex flex-row items-center justify-items-center">
-                  <Tag><SearchAdvanced /></Tag>
-                  <div class="ml-2">
-                    Semantic search:
-                    {searchText}
-                  </div>
-                </div>
-              {:else}
-                <div class="flex justify-between gap-x-8" class:isSignal class:isConcept>
-                  <div>{item.text}</div>
-                  {#if item.description}
-                    <div class="truncate text-xs text-gray-500">{item.description}</div>
-                  {/if}
-                </div>
-              {/if}
-            </ComboBox>
-          </div>
-        </div>
-      </div>
+<!-- Search boxes -->
+<div class="flex h-full w-full flex-grow items-center">
+  <div class="flex w-full rounded border border-gray-200">
+    <div
+      class="search-icon flex items-center"
+      use:hoverTooltip={{text: 'Select the field to search over.'}}
+    >
+      <Search class="ml-2 mr-px" size={16} />
     </div>
-  </div>
-  <div class="mx-1" use:hoverTooltip={{text: 'Select the field to search over.'}}>
-    {#key visibleStringPaths}
-      <Select
+    <div class="embedding-dropdown rounded border-r border-gray-200">
+      <Dropdown
         size="xl"
-        class="field-select w-48"
-        selected={searchPath ? serializePath(searchPath) : ''}
-        on:change={selectField}
-        disabled={visibleStringPaths.length === 0}
-        warn={visibleStringPaths.length === 0}
+        class="w-48"
+        on:select={selectField}
+        disabled={searchPath == null}
+        selectedId={searchPath ? serializePath(searchPath) : dropdownItems[0]?.id}
+        items={dropdownItems}
+        let:item
       >
-        {#each visibleStringPaths as field}
-          <SelectItem value={serializePath(field)} text={serializePath(field)} />
-        {/each}
-      </Select>
-    {/key}
-  </div>
-  <div class="embedding-select flex flex-row">
-    <div class="w-32" use:hoverTooltip={{text: 'Select the embedding to use.'}}>
-      <Select
+        {@const dropdownItem = dropdownItems.find(x => x === item)}
+        <div class="flex h-full w-full items-center justify-between gap-x-1">
+          {#if dropdownItem}
+            <div class="w-full flex-grow truncate">
+              {dropdownItem.text}
+            </div>
+            {#if dropdownItem.embeddings.length > 0}
+              <div
+                use:hoverTooltip={{
+                  text: `Computed embeddings: ${dropdownItem.embeddings.join(', ')}`
+                }}
+              >
+                <Tag><AssemblyCluster /></Tag>
+              </div>
+            {/if}
+          {/if}
+        </div>
+      </Dropdown>
+    </div>
+    <div class="search-container w-full flex-grow">
+      <ComboBox
         size="xl"
-        on:change={selectEmbedding}
-        selected={selectedEmbedding || ''}
-        name={selectedEmbedding || ''}
+        class="w-full"
+        bind:this={comboBox}
+        items={searchItems}
+        bind:value={searchText}
+        on:select={selectSearchItem}
+        shouldFilterItem={(item, value) =>
+          item.text.toLowerCase().includes(value.toLowerCase()) ||
+          item.id === 'new-concept' ||
+          item.id === 'compute-embedding'}
+        placeholder={placeholderText}
+        let:item={it}
       >
-        {#each $embeddings.data || [] as embedding}
-          <SelectItem value={embedding.name} text={embedding.name} />
-        {/each}
-      </Select>
+        {@const item = searchItems.find(p => p.id === it.id)}
+        {@const isSignal =
+          item != null &&
+          typeof item.id === 'object' &&
+          item.id.type === 'field' &&
+          item.id.isSignal}
+        {@const isConcept =
+          item != null && typeof item.id === 'object' && item.id.type === 'concept'}
+        {#if item == null}
+          <div />
+        {:else if item.id === 'new-concept'}
+          <div class="new-concept flex flex-row items-center justify-items-center">
+            <Tag><Add /></Tag>
+            <div class="ml-2">
+              New concept{searchText != '' ? ':' : ''}
+              {searchText}
+            </div>
+          </div>
+        {:else if item.id === 'keyword-search'}
+          <div class="new-keyword flex flex-row items-center justify-items-center">
+            <Tag><SearchAdvanced /></Tag>
+            <div class="ml-2">
+              Keyword search:
+              {searchText}
+            </div>
+          </div>
+        {:else if item.id === 'semantic-search'}
+          <div class="new-keyword flex flex-row items-center justify-items-center">
+            <Tag><SearchAdvanced /></Tag>
+            <div class="ml-2">
+              Semantic search:
+              {searchText}
+            </div>
+          </div>
+        {:else if item.id === 'compute-embedding' && selectedEmbedding && searchPath}
+          <div class="new-concept flex items-center">
+            <Tag><Chip /></Tag>
+            <div class="ml-2">Compute embeddings to enable concept search.</div>
+          </div>
+        {:else}
+          <div class="flex justify-between gap-x-8" class:isSignal class:isConcept>
+            <div>{item.text}</div>
+            {#if item.description}
+              <div class="truncate text-xs text-gray-500">{item.description}</div>
+            {/if}
+          </div>
+        {/if}
+      </ComboBox>
     </div>
   </div>
 </div>
 
 <style lang="postcss">
+  .search-icon {
+    background-color: rgb(250, 250, 250);
+  }
   :global(.bx--form__helper-text) {
     padding: 0 0 0 1rem;
   }
@@ -446,12 +462,20 @@
   :global(.new-concept, .new-keyword) {
     @apply h-full;
   }
-
   /* Style the combobox item's parent div with a background color depending on type of search. */
   :global(.bx--list-box__menu-item:not(.bx--list-box__menu-item--highlighted):has(.isSignal)) {
     @apply bg-blue-50;
   }
   :global(.bx--list-box__menu-item:not(.bx--list-box__menu-item--highlighted):has(.isConcept)) {
     @apply bg-emerald-100;
+  }
+  :global(.search-container .bx--list-box__menu) {
+    max-height: 26rem !important;
+  }
+  :global(.search-container .bx--list-box__field) {
+    height: 100%;
+  }
+  :global(.embedding-dropdown .bx--list-box__menu-item__option) {
+    padding-right: 0;
   }
 </style>

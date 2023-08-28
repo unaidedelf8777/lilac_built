@@ -3,17 +3,11 @@
    * Component that renders string spans as an absolute positioned
    * layer, meant to be rendered on top of the source text.
    */
-  import type {DatasetState} from '$lib/stores/datasetStore';
-  import {
-    ITEM_SCROLL_CONTAINER_CTX_KEY,
-    getSearchPath,
-    mergeSpans,
-    type MergedSpan
-  } from '$lib/view_utils';
-
   import {editConceptMutation} from '$lib/queries/conceptQueries';
+  import type {DatasetState} from '$lib/stores/datasetStore';
   import type {DatasetViewStore} from '$lib/stores/datasetViewStore';
   import {getNotificationsContext} from '$lib/stores/notificationsStore';
+  import {ITEM_SCROLL_CONTAINER_CTX_KEY, mergeSpans, type MergedSpan} from '$lib/view_utils';
   import {
     getValueNodes,
     pathIsEqual,
@@ -45,6 +39,8 @@
   export let row: LilacValueNode;
   // Path of the spans for this item to render.
   export let spanPaths: Path[];
+  export let path: Path | undefined = undefined;
+
   // Information about each value under span paths to render.
   export let valuePaths: SpanValueInfo[];
   export let markdown = false;
@@ -152,19 +148,10 @@
     ITEM_SCROLL_CONTAINER_CTX_KEY
   );
 
-  // Click details.
-  let searchPath: Path | null;
-  $: {
-    if ($datasetViewStore != null && datasetStore != null) {
-      searchPath = getSearchPath($datasetViewStore, datasetStore);
-    }
-  }
-
   const findSimilar = (embedding: string, text: string) => {
-    if (datasetViewStore == null || searchPath == null) return;
-
+    if (datasetViewStore == null || path == null) return;
     datasetViewStore.addSearch({
-      path: [serializePath(searchPath)],
+      path: [serializePath(path)],
       type: 'semantic',
       query: text,
       embedding

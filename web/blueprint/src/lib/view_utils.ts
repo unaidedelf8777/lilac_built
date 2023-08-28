@@ -198,26 +198,13 @@ export function isPathVisible(
   return true;
 }
 
-export function getSearchPath(store: DatasetViewState, datasetStore: DatasetState): Path | null {
-  // If the user explicitly chose a search path, use it.
-  if (store.searchPath != null && store.selectedColumns[store.searchPath] != false)
-    return deserializePath(store.searchPath);
-
-  // Without explicit selection, choose the default string path.
-  return getDefaultSearchPath(datasetStore);
-}
-
 export function getSearchEmbedding(
-  appSettings: SettingsState,
   datasetSettings: DatasetSettings | undefined,
-  store: DatasetViewState,
+  appSettings: SettingsState,
   datasetStore: DatasetState,
-  searchPath: Path | null,
+  searchPath: Path | undefined,
   embeddings: string[]
 ): string | null {
-  if (store.searchEmbedding != null) {
-    return store.searchEmbedding;
-  }
   if (datasetSettings != null && datasetSettings.preferred_embedding != null) {
     return datasetSettings.preferred_embedding;
   }
@@ -247,7 +234,10 @@ export function getSearchEmbedding(
 }
 
 /** Get the computed embeddings for a path. */
-export function getComputedEmbeddings(datasetStore: DatasetState, path: Path | null): string[] {
+export function getComputedEmbeddings(
+  datasetStore: DatasetState,
+  path: Path | undefined
+): string[] {
   if (datasetStore.schema == null || path == null) return [];
 
   const existingEmbeddings: Set<string> = new Set();
@@ -276,28 +266,29 @@ export function getSearches(store: DatasetViewState, path?: Path | null): Search
   return (store.query.searches || []).filter(s => pathIsEqual(s.path, path));
 }
 
-function getDefaultSearchPath(datasetStore: DatasetState): Path | null {
+export function getDefaultSearchPath(
+  datasetStore: DatasetState,
+  mediaPaths: Path[]
+): Path | undefined {
   if (datasetStore.stats == null || datasetStore.stats.length === 0) {
-    return null;
+    return undefined;
   }
-  const visibleStringPaths = (datasetStore.visibleFields || [])
-    .filter(f => f.dtype === 'string')
-    .map(f => serializePath(f.path));
   // The longest visible path that has an embedding is auto-selected.
-  let paths = datasetStore.stats.map(stat => {
+  const mediaPathsStats = datasetStore.stats.filter(s =>
+    mediaPaths.some(p => pathIsEqual(s.path, p))
+  );
+  if (mediaPathsStats.length === 0) {
+    return undefined;
+  }
+  let paths = mediaPathsStats.map(stat => {
     return {
       path: stat.path,
       embeddings: getComputedEmbeddings(datasetStore, stat.path),
-      avgTextLength: stat.avg_text_length,
-      isVisible: visibleStringPaths.indexOf(serializePath(stat.path)) >= 0
+      avgTextLength: stat.avg_text_length
     };
   });
   paths = paths.sort((a, b) => {
-    if (!a.isVisible && b.isVisible) {
-      return 1;
-    } else if (a.isVisible && !b.isVisible) {
-      return -1;
-    } else if (a.embeddings.length > 0 && b.embeddings.length === 0) {
+    if (a.embeddings.length > 0 && b.embeddings.length === 0) {
       return -1;
     } else if (a.embeddings.length === 0 && b.embeddings.length > 0) {
       return 1;
@@ -757,6 +748,9 @@ export function shortFieldName(path: Path): string {
 }
 
 export function displayPath(path: Path): string {
+  if (!Array.isArray(path)) {
+    path = [path];
+  }
   const result = path.join('.');
   return result.replaceAll(`.${PATH_WILDCARD}`, '[]');
 }
