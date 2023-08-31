@@ -35,7 +35,13 @@
   $: userId = $authInfo.data?.user?.id;
 
   $: defaultNamespace = command.namespace || (authEnabled ? userId : null);
+
   let namespace = defaultNamespace || 'local';
+  $: {
+    if (userId != null) {
+      namespace = userId;
+    }
+  }
   $: dataset = command.dataset;
   $: datasetId = dataset ? `${dataset.namespace}/${dataset.name}` : '';
   $: path = command.path;
