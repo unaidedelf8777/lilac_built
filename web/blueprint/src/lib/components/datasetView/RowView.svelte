@@ -7,7 +7,7 @@
   } from '$lib/queries/datasetQueries';
   import {getDatasetContext} from '$lib/stores/datasetStore';
   import {getDatasetViewContext, getSelectRowsOptions} from '$lib/stores/datasetViewStore';
-  import {ITEM_SCROLL_CONTAINER_CTX_KEY, getMediaFields, getVisibleSchema} from '$lib/view_utils';
+  import {ITEM_SCROLL_CONTAINER_CTX_KEY, getMediaFields} from '$lib/view_utils';
   import {serializePath} from '$lilac';
   import {InlineNotification, SkeletonText} from 'carbon-components-svelte';
   import {setContext} from 'svelte';
@@ -43,11 +43,9 @@
   $: visibleFields = ($datasetStore.visibleFields || []).sort((a, b) =>
     serializePath(a.path) > serializePath(b.path) ? 1 : -1
   );
-  $: visibleSchema =
-    $datasetStore.selectRowsSchema?.data?.schema != null
-      ? getVisibleSchema($datasetStore.selectRowsSchema?.data?.schema, visibleFields)!
-      : null;
-  $: mediaFields = $settings.data ? getMediaFields(visibleSchema, $settings.data) : [];
+  $: mediaFields = $settings.data
+    ? getMediaFields($datasetStore.selectRowsSchema?.data?.schema, $settings.data)
+    : [];
   // Pass the item scroll container to children so they can handle scroll events.
   let itemScrollContainer: HTMLDivElement | null = null;
   const writableStore = writable<HTMLDivElement | null>(itemScrollContainer);
@@ -83,7 +81,7 @@
     bind:this={itemScrollContainer}
   >
     {#each items as row}
-      <RowItem {visibleFields} {row} {mediaFields} />
+      <RowItem {row} {mediaFields} />
     {/each}
     {#if items.length > 0}
       <InfiniteScroll threshold={100} on:loadMore={() => $rows?.fetchNextPage()} />
