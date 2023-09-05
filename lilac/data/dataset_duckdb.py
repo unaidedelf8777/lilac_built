@@ -1667,8 +1667,16 @@ def _merge_cells(dest_cell: Item, source_cell: Item) -> Item:
       # Primitives can be merged together if they are equal. This can happen if a user selects a
       # column that is the child of another.
       # NOTE: This can be removed if we fix https://github.com/lilacai/lilac/issues/166.
-      if source_cell != dest_cell:
-        raise ValueError(f'Cannot merge source "{source_cell!r}" into destination "{dest_cell!r}"')
+      if isinstance(dest_cell, float):
+        # For floats, explicitly check closeness as precision issues can lead to them not being
+        # exactly equal.
+        if not math.isclose(source_cell, dest_cell, abs_tol=1e-5):
+          raise ValueError(
+            f'Cannot merge source "{source_cell!r}" into destination "{dest_cell!r}"')
+      else:
+        if source_cell != dest_cell:
+          raise ValueError(
+            f'Cannot merge source "{source_cell!r}" into destination "{dest_cell!r}"')
       return dest_cell
 
 
