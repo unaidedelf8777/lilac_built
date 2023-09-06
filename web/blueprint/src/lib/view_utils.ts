@@ -146,7 +146,7 @@ export function getSearchEmbedding(
   }
   if (searchPath == null) return null;
 
-  const existingEmbeddings = getComputedEmbeddings(datasetStore, searchPath);
+  const existingEmbeddings = getComputedEmbeddings(datasetStore.schema, searchPath);
   // Sort embeddings by what have already been precomputed first.
   const sortedEmbeddings =
     existingEmbeddings != null
@@ -168,13 +168,13 @@ export function getSearchEmbedding(
 
 /** Get the computed embeddings for a path. */
 export function getComputedEmbeddings(
-  datasetStore: DatasetState,
+  schema: LilacSchema | undefined | null,
   path: Path | undefined
 ): string[] {
-  if (datasetStore.schema == null || path == null) return [];
+  if (schema == null || path == null) return [];
 
   const existingEmbeddings: Set<string> = new Set();
-  const embeddingSignalRoots = childFields(getField(datasetStore.schema, path)).filter(
+  const embeddingSignalRoots = childFields(getField(schema, path)).filter(
     f => f.signal != null && childFields(f).some(f => f.dtype === 'embedding')
   );
   for (const field of embeddingSignalRoots) {
@@ -216,7 +216,7 @@ export function getDefaultSearchPath(
   let paths = mediaPathsStats.map(stat => {
     return {
       path: stat.path,
-      embeddings: getComputedEmbeddings(datasetStore, stat.path),
+      embeddings: getComputedEmbeddings(datasetStore.schema, stat.path),
       avgTextLength: stat.avg_text_length
     };
   });
@@ -237,7 +237,7 @@ export function getDefaultSearchPath(
 export function getTaggedDatasets(
   selectedDataset: {namespace: string; datasetName: string} | null,
   datasets: DatasetInfo[]
-): NavigationTagGroup[] {
+): NavigationTagGroup<DatasetInfo>[] {
   const tagDatasets: Record<string, Record<string, DatasetInfo[]>> = {};
   for (const dataset of datasets) {
     let tags = [''];
@@ -264,9 +264,11 @@ export function getTaggedDatasets(
   const pinnedDatasets = ['OpenOrca-100k'];
 
   // Sort each tag by namespace and then dataset name.
-  const taggedDatasetGroups: NavigationTagGroup[] = [];
+  const taggedDatasetGroups: NavigationTagGroup<DatasetInfo>[] = [];
   for (const tag of sortedTags) {
-    const sortedNamespaceDatasets: NavigationGroupItem[] = Object.keys(tagDatasets[tag])
+    const sortedNamespaceDatasets: NavigationGroupItem<DatasetInfo>[] = Object.keys(
+      tagDatasets[tag]
+    )
       .sort(
         (a, b) =>
           namespaceSortPriorities.indexOf(b) - namespaceSortPriorities.indexOf(a) ||
@@ -285,7 +287,8 @@ export function getTaggedDatasets(
             link: datasetLink(d.namespace, d.dataset_name),
             isSelected:
               selectedDataset?.namespace === d.namespace &&
-              selectedDataset?.datasetName === d.dataset_name
+              selectedDataset?.datasetName === d.dataset_name,
+            item: d
           }))
       }));
     taggedDatasetGroups.push({tag, groups: sortedNamespaceDatasets});
@@ -298,7 +301,7 @@ export function getTaggedConcepts(
   concepts: ConceptInfo[],
   userId: string | undefined,
   username: string | undefined
-): NavigationTagGroup[] {
+): NavigationTagGroup<ConceptInfo>[] {
   const tagConcepts: Record<string, Record<string, ConceptInfo[]>> = {};
   for (const concept of concepts) {
     let tags = [''];
@@ -319,9 +322,11 @@ export function getTaggedConcepts(
   const namespaceSortPriorities = ['lilac'];
 
   // Sort each tag by namespace and then dataset name.
-  const taggedDatasetGroups: NavigationTagGroup[] = [];
+  const taggedDatasetGroups: NavigationTagGroup<ConceptInfo>[] = [];
   for (const tag of Object.keys(tagConcepts).sort()) {
-    const sortedNamespaceDatasets: NavigationGroupItem[] = Object.keys(tagConcepts[tag])
+    const sortedNamespaceDatasets: NavigationGroupItem<ConceptInfo>[] = Object.keys(
+      tagConcepts[tag]
+    )
       .sort(
         (a, b) =>
           namespaceSortPriorities.indexOf(a) - namespaceSortPriorities.indexOf(b) ||
@@ -335,7 +340,8 @@ export function getTaggedConcepts(
             name: c.name,
             link: conceptLink(c.namespace, c.name),
             isSelected:
-              selectedConcept?.namespace === c.namespace && selectedConcept?.name === c.name
+              selectedConcept?.namespace === c.namespace && selectedConcept?.name === c.name,
+            item: c
           }))
       }));
     taggedDatasetGroups.push({tag, groups: sortedNamespaceDatasets});
