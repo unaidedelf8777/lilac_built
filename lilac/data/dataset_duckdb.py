@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 import yaml
 from pandas.api.types import is_object_dtype
-from pydantic import BaseModel, validator
+from pydantic import BaseModel, SerializeAsAny, field_validator
 from typing_extensions import override
 
 from ..auth import UserInfo
@@ -201,8 +201,8 @@ class DatasetDuckDB(Dataset):
     shutil.rmtree(self.dataset_path, ignore_errors=True)
     delete_project_dataset_config(self.namespace, self.dataset_name, self.project_dir)
 
-  def _create_view(self, view_name: str, files: list[str], type: Union[Literal['parquet'],
-                                                                       Literal['sqlite']]) -> None:
+  def _create_view(self, view_name: str, files: list[str], type: Literal['parquet',
+                                                                         'sqlite']) -> None:
     inner_select: str
     if type == 'parquet':
       inner_select = f'SELECT * FROM read_parquet({files})'
@@ -224,7 +224,7 @@ class DatasetDuckDB(Dataset):
   @functools.cache
   def _recompute_joint_table(self, latest_mtime_micro_sec: int) -> DatasetManifest:
     del latest_mtime_micro_sec  # This is used as the cache key.
-    merged_schema = self._source_manifest.data_schema.copy(deep=True)
+    merged_schema = self._source_manifest.data_schema.model_copy(deep=True)
     self._signal_manifests = []
     self._label_schemas = {}
     # Make a joined view of all the column groups.
@@ -237,7 +237,7 @@ class DatasetDuckDB(Dataset):
       for file in files:
         if file.endswith(SIGNAL_MANIFEST_FILENAME):
           with open_file(os.path.join(root, file)) as f:
-            signal_manifest = SignalManifest.parse_raw(f.read())
+            signal_manifest = SignalManifest.model_validate_json(f.read())
           self._signal_manifests.append(signal_manifest)
           signal_files = [os.path.join(root, f) for f in signal_manifest.files]
           if signal_files:
@@ -413,7 +413,7 @@ class DatasetDuckDB(Dataset):
       parquet_id=make_signal_parquet_id(signal, source_path, is_computed_signal=True))
     signal_manifest_filepath = os.path.join(output_dir, SIGNAL_MANIFEST_FILENAME)
     with open_file(signal_manifest_filepath, 'w') as f:
-      f.write(signal_manifest.json(exclude_none=True, indent=2))
+      f.write(signal_manifest.model_dump_json(exclude_none=True, indent=2))
 
     log(f'Wrote signal output to {output_dir}')
 
@@ -460,7 +460,7 @@ class DatasetDuckDB(Dataset):
     signal_manifest_filepath = os.path.join(output_dir, SIGNAL_MANIFEST_FILENAME)
 
     with open_file(signal_manifest_filepath, 'w') as f:
-      f.write(signal_manifest.json(exclude_none=True, indent=2))
+      f.write(signal_manifest.model_dump_json(exclude_none=True, indent=2))
 
     log(f'Wrote embedding index to {output_dir}')
 
@@ -1187,7 +1187,7 @@ class DatasetDuckDB(Dataset):
       if col.signal_udf:
         udfs.append(SelectRowsSchemaUDF(path=dest_path, alias=col.alias))
         field = col.signal_udf.fields()
-        field.signal = col.signal_udf.dict()
+        field.signal = col.signal_udf.model_dump()
       elif manifest.data_schema.has_field(dest_path):
         field = manifest.data_schema.get_field(dest_path)
       else:
@@ -1736,7 +1736,7 @@ def read_source_manifest(dataset_path: str) -> SourceManifest:
   # TODO(nsthorat): Overwrite the source manifest with a "source" added if the source is not defined
   # by reading the config yml.
   with open_file(os.path.join(dataset_path, MANIFEST_FILENAME), 'r') as f:
-    source_manifest = SourceManifest.parse_raw(f.read())
+    source_manifest = SourceManifest.model_validate_json(f.read())
 
   # For backwards compatibility, check if the config.yml has the source and write it back to the
   # source manifest.
@@ -1749,7 +1749,7 @@ def read_source_manifest(dataset_path: str) -> SourceManifest:
         if dataset_config.source:
           source_manifest.source = dataset_config.source
       with open_file(os.path.join(dataset_path, MANIFEST_FILENAME), 'w') as f:
-        f.write(source_manifest.json(indent=2, exclude_none=True))
+        f.write(source_manifest.model_dump_json(indent=2, exclude_none=True))
 
   return source_manifest
 
@@ -1785,7 +1785,7 @@ class SignalManifest(BaseModel):
   parquet_id: str
 
   data_schema: Schema
-  signal: Signal
+  signal: SerializeAsAny[Signal]
 
   # The column path that this signal is derived from.
   enriched_path: PathTuple
@@ -1793,7 +1793,8 @@ class SignalManifest(BaseModel):
   # The name of the vector store. Present when the signal is an embedding.
   vector_store: Optional[str] = None
 
-  @validator('signal', pre=True)
+  @field_validator('signal', mode='before')
+  @classmethod
   def parse_signal(cls, signal: dict) -> Signal:
     """Parse a signal to its specific subclass instance."""
     return resolve_signal(signal)

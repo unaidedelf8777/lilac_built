@@ -1,3 +1,4 @@
+/* generated using openapi-typescript-codegen -- do no edit */
 /* istanbul ignore file */
 /* tslint:disable */
 /* eslint-disable */
@@ -337,7 +338,7 @@ export class DatasetsService {
     public static getConfig(
         namespace: string,
         datasetName: string,
-        format: ('yaml' | 'json'),
+        format: 'yaml' | 'json',
     ): CancelablePromise<(string | Record<string, any>)> {
         return __request(OpenAPI, {
             method: 'GET',

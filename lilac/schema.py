@@ -9,7 +9,15 @@ from typing import Any, Optional, Union, cast
 
 import numpy as np
 import pyarrow as pa
-from pydantic import BaseModel, StrictInt, StrictStr, validator
+from pydantic import (
+  BaseModel,
+  ConfigDict,
+  FieldValidationInfo,
+  StrictInt,
+  StrictStr,
+  field_validator,
+  model_validator,
+)
 from typing_extensions import TypedDict
 
 from lilac.utils import is_primitive
@@ -38,8 +46,8 @@ Item = Any
 #  ['article', 'field'] represents {'article': {'field': VALUES}}
 #  ['article', '*', 'field'] represents {'article': [{'field': VALUES}, {'field': VALUES}]}
 #  ['article', '0', 'field'] represents {'article': {'field': VALUES}}
-PathTuple = tuple[StrictStr, ...]
-Path = Union[PathTuple, StrictStr]
+PathTuple = tuple[str, ...]
+Path = Union[PathTuple, str]
 
 PathKeyedItem = tuple[Path, Item]
 
@@ -128,30 +136,18 @@ class Field(BaseModel):
   bins: Optional[list[Bin]] = None
   categorical: Optional[bool] = None
 
-  @validator('fields')
-  def either_fields_or_repeated_field_is_defined(
-      cls, fields: Optional[dict[str, 'Field']], values: dict[str,
-                                                              Any]) -> Optional[dict[str, 'Field']]:
-    """Error if both `fields` and `repeated_fields` are defined."""
+  @field_validator('fields')
+  @classmethod
+  def validate_fields(cls, fields: Optional[dict[str, 'Field']]) -> Optional[dict[str, 'Field']]:
+    """Validate the fields."""
     if not fields:
       return fields
-    if values.get('repeated_field'):
-      raise ValueError('Both "fields" and "repeated_field" should not be defined')
     if VALUE_KEY in fields:
       raise ValueError(f'{VALUE_KEY} is a reserved field name.')
     return fields
 
-  @validator('dtype', always=True)
-  def infer_default_dtype(cls, dtype: Optional[DataType], values: dict[str,
-                                                                       Any]) -> Optional[DataType]:
-    """Infers the default value for dtype if not explicitly provided."""
-    if dtype and values.get('repeated_field'):
-      raise ValueError('dtype and repeated_field cannot both be defined.')
-    if not values.get('repeated_field') and not values.get('fields') and not dtype:
-      raise ValueError('One of "fields", "repeated_field", or "dtype" should be defined')
-    return dtype
-
-  @validator('bins')
+  @field_validator('bins')
+  @classmethod
   def validate_bins(cls, bins: list[Bin]) -> list[Bin]:
     """Validate the bins."""
     if len(bins) < 2:
@@ -172,18 +168,33 @@ class Field(BaseModel):
           f'Bin {i} start ({start}) should be equal to the previous bin end {prev_end}.')
     return bins
 
-  @validator('categorical')
-  def validate_categorical(cls, categorical: bool, values: dict[str, Any]) -> bool:
+  @field_validator('categorical')
+  @classmethod
+  def validate_categorical(cls, categorical: bool, info: FieldValidationInfo) -> bool:
     """Validate the categorical field."""
-    if categorical and is_float(values['dtype']):
+    if categorical and is_float(info.data['dtype']):
       raise ValueError('Categorical fields cannot be float dtypes.')
     return categorical
+
+  @model_validator(mode='after')
+  def validate_field(self) -> 'Field':
+    """Validate the field model."""
+    if self.fields and self.repeated_field:
+      raise ValueError('Both "fields" and "repeated_field" should not be defined')
+
+    if self.dtype and self.repeated_field:
+      raise ValueError('dtype and repeated_field cannot both be defined.')
+
+    if not self.repeated_field and not self.fields and not self.dtype:
+      raise ValueError('One of "fields", "repeated_field", or "dtype" should be defined')
+
+    return self
 
   def __str__(self) -> str:
     return _str_field(self, indent=0)
 
   def __repr__(self) -> str:
-    return f' {self.__class__.__name__}::{self.json(exclude_none=True, indent=2)}'
+    return f' {self.__class__.__name__}::{self.model_dump_json(exclude_none=True, indent=2)}'
 
 
 class Schema(BaseModel):
@@ -193,10 +204,7 @@ class Schema(BaseModel):
   _leafs: Optional[dict[PathTuple, Field]] = None
   # Cached flat list of all the fields.
   _all_fields: Optional[list[tuple[PathTuple, Field]]] = None
-
-  class Config:
-    arbitrary_types_allowed = True
-    underscore_attrs_are_private = True
+  model_config = ConfigDict(arbitrary_types_allowed=True)
 
   @property
   def leafs(self) -> dict[PathTuple, Field]:
@@ -246,6 +254,11 @@ class Schema(BaseModel):
     self._all_fields = result
     return result
 
+  def __eq__(self, other: Any) -> bool:
+    if not isinstance(other, Schema):
+      return False
+    return self.model_dump() == other.model_dump()
+
   def has_field(self, path: PathTuple) -> bool:
     """Returns if the field is found at the given path."""
     if path == (ROWID,):
@@ -286,7 +299,7 @@ class Schema(BaseModel):
     return _str_fields(self.fields, indent=0)
 
   def __repr__(self) -> str:
-    return self.json(exclude_none=True, indent=2)
+    return self.model_dump_json(exclude_none=True, indent=2)
 
 
 def schema(schema_like: object) -> Schema:
