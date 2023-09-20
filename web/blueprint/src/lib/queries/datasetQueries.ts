@@ -129,20 +129,12 @@ export const querySelectRows = (
   schema?: LilacSchema | undefined
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): CreateQueryResult<Awaited<{rows: Record<string, any>[]; total_num_rows: number}>, ApiError> =>
-  createApiQuery(
-    async function selectRows(
-      namespace: string,
-      datasetName: string,
-      selectRowsOptions: SelectRowsOptions
-    ) {
-      const res = await DatasetsService.selectRows(namespace, datasetName, selectRowsOptions);
-      return {
-        rows: schema == null ? res.rows : res.rows.map(row => deserializeRow(row, schema)),
-        total_num_rows: res.total_num_rows
-      };
-    },
-    [DATASETS_TAG, 'selectRows', namespace, datasetName]
-  )(namespace, datasetName, selectRowsOptions);
+  createApiQuery(DatasetsService.selectRows, [DATASETS_TAG, 'selectRows', namespace, datasetName], {
+    select: data => ({
+      rows: schema == null ? data.rows : data.rows.map(row => deserializeRow(row, schema)),
+      total_num_rows: data.total_num_rows
+    })
+  })(namespace, datasetName, selectRowsOptions);
 
 /** Gets the metadata for a single row. */
 export const queryRowMetadata = (
@@ -153,15 +145,13 @@ export const queryRowMetadata = (
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): CreateQueryResult<Awaited<Record<string, any>>, ApiError> =>
   createApiQuery(
-    async function selectRows(
-      namespace: string,
-      datasetName: string,
-      selectRowsOptions: SelectRowsOptions
-    ) {
-      const res = await DatasetsService.selectRows(namespace, datasetName, selectRowsOptions);
-      return schema == null ? res.rows[0] : deserializeRow(res.rows[0], schema);
-    },
-    [DATASETS_TAG, namespace, datasetName, DATASET_ITEM_METADATA_TAG, rowId]
+    DatasetsService.selectRows,
+    [DATASETS_TAG, namespace, datasetName, DATASET_ITEM_METADATA_TAG, rowId],
+    {
+      select: res => {
+        return schema == null ? res.rows[0] : deserializeRow(res.rows[0], schema);
+      }
+    }
   )(namespace, datasetName, {
     filters: [{path: [ROWID], op: 'equals', value: rowId}],
     columns: [PATH_WILDCARD, ROWID],
@@ -239,9 +229,17 @@ function invalidateQueriesLabelEdit(
   options: AddLabelsOptions | RemoveLabelsOptions
 ) {
   const schemaLabels = getSchemaLabels(schema);
-  if (!schemaLabels.includes(options.label_name)) {
+  const labelExists = schemaLabels.includes(options.label_name);
+
+  if (!labelExists) {
     queryClient.invalidateQueries([DATASETS_TAG, 'getManifest']);
     queryClient.invalidateQueries([DATASETS_TAG, 'selectRowsSchema']);
+    queryClient.invalidateQueries([
+      DATASETS_TAG,
+      namespace,
+      datasetName,
+      DATASET_ITEM_METADATA_TAG
+    ]);
   }
 
   if (options.row_ids != null) {
