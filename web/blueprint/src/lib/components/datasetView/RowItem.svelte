@@ -1,8 +1,8 @@
 <script lang="ts">
-  import {queryRowMetadata, removeLabelsMutation} from '$lib/queries/datasetQueries';
+  import {queryRowMetadata as queryRow, removeLabelsMutation} from '$lib/queries/datasetQueries';
   import {queryAuthInfo} from '$lib/queries/serverQueries';
   import {getDatasetContext} from '$lib/stores/datasetStore';
-  import {getDatasetViewContext} from '$lib/stores/datasetViewStore';
+  import {getDatasetViewContext, getSelectRowsOptions} from '$lib/stores/datasetViewStore';
   import {getNotificationsContext} from '$lib/stores/notificationsStore';
   import {getRowLabels, serializePath, type LilacField, type RemoveLabelsOptions} from '$lilac';
   import {SkeletonText} from 'carbon-components-svelte';
@@ -33,11 +33,12 @@
 
   $: selectRowsSchema = $datasetStore.selectRowsSchema?.data;
 
-  $: metadataQuery =
+  $: selectOptions = getSelectRowsOptions($datasetViewStore);
+  $: rowQuery =
     selectRowsSchema != null
-      ? queryRowMetadata(namespace, datasetName, rowId, selectRowsSchema.schema)
+      ? queryRow(namespace, datasetName, rowId, selectOptions, selectRowsSchema.schema)
       : null;
-  $: row = $metadataQuery?.data != null ? $metadataQuery.data : null;
+  $: row = $rowQuery?.data != null ? $rowQuery.data : null;
   $: rowLabels = row != null ? getRowLabels(row) : [];
 
   const removeLabel = (label: string) => {
@@ -58,8 +59,8 @@
 </script>
 
 <div class="flex flex-col rounded border border-neutral-300 md:flex-row">
-  {#if row == null || $metadataQuery?.isFetching}
-    <SkeletonText lines={6} paragraph />
+  {#if row == null || $rowQuery?.isFetching}
+    <SkeletonText lines={4} paragraph class="w-full" />
   {:else}
     <div class="flex flex-col gap-y-1 p-4 md:w-2/3" bind:clientHeight={mediaHeight}>
       <div class="flex flex-wrap gap-x-2 gap-y-2">
@@ -91,7 +92,7 @@
           <div
             class:border-b={i < mediaFields.length - 1}
             class:pb-2={i < mediaFields.length - 1}
-            class="flex h-full w-full border-neutral-200"
+            class="flex h-full w-full flex-col border-neutral-200"
           >
             <ItemMedia {row} path={mediaField.path} field={mediaField} {highlightedFields} />
           </div>

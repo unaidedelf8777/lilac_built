@@ -768,10 +768,15 @@ class DatasetDuckDB(Dataset):
   def _topk_udf_to_sort_by(
     self,
     udf_columns: list[Column],
+    filters: list[Filter],
     sort_by: list[PathTuple],
     limit: Optional[int],
     sort_order: Optional[SortOrder],
   ) -> Optional[Column]:
+    # If the user provides a specific row id, avoid sorting as we know it is a single row result.
+    for f in filters:
+      if f.path == (ROWID,) and f.op == 'equals':
+        return None
     if (sort_order != SortOrder.DESC) or (not limit) or (not sort_by):
       return None
     if len(sort_by) < 1:
@@ -860,15 +865,20 @@ class DatasetDuckDB(Dataset):
     offset = offset or 0
     schema = manifest.data_schema
 
-    if combine_columns:
-      schema = self.select_rows_schema(
-        columns, sort_by, sort_order, searches, combine_columns=True).data_schema
-
-    self._validate_columns(cols, manifest.data_schema, schema)
     self._normalize_searches(searches, manifest)
     search_udfs = self._search_udfs(searches, manifest)
+
     cols.extend([search_udf.udf for search_udf in search_udfs])
     udf_columns = [col for col in cols if col.signal_udf]
+    if combine_columns:
+      schema = self.select_rows_schema(
+        [Column(path=PATH_WILDCARD)] + udf_columns,
+        sort_by,
+        sort_order,
+        searches,
+        combine_columns=True).data_schema
+
+    self._validate_columns(cols, manifest.data_schema, schema)
 
     temp_rowid_selected = False
     for col in cols:
@@ -914,7 +924,7 @@ class DatasetDuckDB(Dataset):
     total_num_rows = manifest.num_items
     con = self.con.cursor()
 
-    topk_udf_col = self._topk_udf_to_sort_by(udf_columns, sort_by, limit, sort_order)
+    topk_udf_col = self._topk_udf_to_sort_by(udf_columns, filters, sort_by, limit, sort_order)
     if topk_udf_col:
       path_keys: Optional[list[PathKey]] = None
       if where_query:
