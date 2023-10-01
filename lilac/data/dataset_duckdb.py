@@ -890,7 +890,7 @@ class DatasetDuckDB(Dataset):
       SELECT {outer_select} AS {value_column}, COUNT() AS {count_column}
       FROM (SELECT {inner_select} AS {inner_val} FROM t {where_query})
       GROUP BY {value_column}
-      ORDER BY {sort_by.value} {sort_order.value}
+      ORDER BY {sort_by.value} {sort_order.value}, {value_column}
       {limit_query}
     """
     df = self._query_df(query)
@@ -1258,7 +1258,7 @@ class DatasetDuckDB(Dataset):
         udf_filter_queries = self._create_where(manifest, udf_filters)
         if udf_filter_queries:
           rel = rel.filter(' AND '.join(udf_filter_queries))
-          total_num_rows = cast(tuple, rel.count('*').fetchone())[0]
+          total_num_rows = cast(tuple, rel.count('*').fetchone())[0]  # type: ignore
 
       if sort_sql_after_udf:
         if not sort_order:
