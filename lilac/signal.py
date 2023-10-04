@@ -1,6 +1,7 @@
 """Interface for implementing a signal."""
 
 import abc
+import copy
 from typing import Any, Callable, ClassVar, Iterable, Optional, Sequence, Type, TypeVar, Union
 
 from pydantic import BaseModel, ConfigDict
@@ -264,7 +265,8 @@ def resolve_signal(signal: Union[dict, Signal]) -> Signal:
   if isinstance(signal, Signal):
     # The signal config is already parsed.
     return signal
-  signal_name = signal.pop('signal_name')
+
+  signal_name = signal.get('signal_name')
   if not signal_name:
     raise ValueError('"signal_name" needs to be defined in the json dict.')
 
@@ -272,6 +274,9 @@ def resolve_signal(signal: Union[dict, Signal]) -> Signal:
   if not signal_cls:
     # Make a metaclass so we get a valid `Signal` class.
     signal_cls = type(f'Signal_{signal_name}', (Signal,), {'name': signal_name})
+
+  signal = copy.deepcopy(signal)
+  del signal['signal_name']
   return signal_cls(**signal)
 
 
