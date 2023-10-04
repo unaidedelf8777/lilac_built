@@ -25,6 +25,7 @@ import {
   type Search,
   type SelectRowsOptions,
   type SemanticSimilaritySignal,
+  type SortResult,
   type SubstringSignal
 } from '$lilac';
 import {
@@ -366,6 +367,11 @@ export function conceptDisplayName(
   return `${conceptNamespace}/${conceptName}`;
 }
 
+export function getSort(datasetStore: DatasetState): SortResult | null {
+  // NOTE: We currently only support sorting by a single column from the UI.
+  return (datasetStore.selectRowsSchema?.data?.sorts || [])[0] || null;
+}
+
 export function getSpanValuePaths(
   field: LilacField,
   highlightedFields?: LilacField[]
@@ -662,11 +668,4 @@ export function displayPath(path: Path | string): string {
   }
   const result = path.join(' › ');
   return result.replaceAll(` › ${PATH_WILDCARD}`, '[]');
-}
-
-export function shortPath(path: Path): string {
-  if (path.length <= 2) {
-    return displayPath(path);
-  }
-  return displayPath([path[0], '...', path[path.length - 1]]);
 }
