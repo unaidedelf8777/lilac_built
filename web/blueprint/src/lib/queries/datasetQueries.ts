@@ -12,7 +12,8 @@ import {
   type LilacSchema,
   type Path,
   type RemoveLabelsOptions,
-  type SelectRowsOptions
+  type SelectRowsOptions,
+  type SelectRowsResponse
 } from '$lilac';
 import {
   QueryClient,
@@ -21,6 +22,12 @@ import {
   type CreateInfiniteQueryResult,
   type CreateQueryResult
 } from '@tanstack/svelte-query';
+import {
+  create as createBatcher,
+  keyResolver,
+  windowScheduler,
+  type Batcher
+} from '@yornaath/batshit';
 import type {JSONSchema7} from 'json-schema';
 import {watchTask} from '../stores/taskMonitoringStore';
 import {queryClient} from './queryClient';
@@ -49,7 +56,7 @@ export const DATASETS_SETTINGS_TAG = 'settings';
 
 export const DATASET_ITEM_METADATA_TAG = 'item_metadata';
 
-export const DEFAULT_SELECT_ROWS_LIMIT = 20;
+export const DEFAULT_SELECT_ROWS_LIMIT = 10;
 
 export const queryDatasets = createApiQuery(DatasetsService.getDatasets, DATASETS_TAG);
 export const queryDatasetManifest = createApiQuery(DatasetsService.getManifest, DATASETS_TAG, {});
@@ -145,6 +152,34 @@ export const querySelectRows = (
     })
   })(namespace, datasetName, selectRowsOptions);
 
+// Create a cache of the batcher so we reuse the same batcher for the same dataset and options.
+const ROW_METADATA_BATCH_WINDOW_MS = 10;
+const batchedRowMetadataCache: Record<string, Batcher<SelectRowsResponse['rows'], string>> = {};
+function getRowMetadataBatcher(
+  namespace: string,
+  datasetName: string,
+  selectRowsOptions: SelectRowsOptions
+): Batcher<SelectRowsResponse['rows'], string> {
+  const key = `${namespace}/${datasetName}/${JSON.stringify(selectRowsOptions)}`;
+  if (batchedRowMetadataCache[key] == null) {
+    batchedRowMetadataCache[key] = createBatcher({
+      fetcher: async (rowIds: string[]) => {
+        const selectRowsResponse = await DatasetsService.selectRows(namespace, datasetName, {
+          filters: [{path: [ROWID], op: 'in', value: rowIds}],
+          searches: selectRowsOptions.searches,
+          columns: [PATH_WILDCARD, ROWID],
+          combine_columns: true,
+          limit: rowIds.length
+        });
+        return selectRowsResponse.rows;
+      },
+      resolver: keyResolver(ROWID),
+      scheduler: windowScheduler(ROW_METADATA_BATCH_WINDOW_MS)
+    });
+  }
+  return batchedRowMetadataCache[key];
+}
+
 /** Gets the metadata for a single row. */
 export const queryRowMetadata = (
   namespace: string,
@@ -155,20 +190,14 @@ export const queryRowMetadata = (
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): CreateQueryResult<Awaited<Record<string, any>>, ApiError> =>
   createApiQuery(
-    DatasetsService.selectRows,
+    getRowMetadataBatcher(namespace, datasetName, selectRowsOptions).fetch,
     [DATASETS_TAG, namespace, datasetName, DATASET_ITEM_METADATA_TAG, rowId],
     {
       select: res => {
-        return schema == null ? res.rows[0] : deserializeRow(res.rows[0], schema);
+        return schema == null ? res : deserializeRow(res, schema);
       }
     }
-  )(namespace, datasetName, {
-    filters: [{path: [ROWID], op: 'equals', value: rowId}],
-    searches: selectRowsOptions.searches,
-    columns: [PATH_WILDCARD, ROWID],
-    combine_columns: true,
-    limit: 1
-  });
+  )(rowId);
 
 export const querySelectRowsSchema = createApiQuery(
   DatasetsService.selectRowsSchema,
