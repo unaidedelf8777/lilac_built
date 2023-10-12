@@ -6,8 +6,6 @@ import numpy as np
 import pytest
 from typing_extensions import override
 
-from lilac.sources.source_registry import clear_source_registry, register_source
-
 from ..config import (
   DatasetConfig,
   DatasetSettings,
@@ -17,6 +15,7 @@ from ..config import (
 )
 from ..schema import Field, Item, RichData, field, lilac_embedding
 from ..signal import TextEmbeddingSignal, TextSignal, clear_signal_registry, register_signal
+from ..sources.source_registry import clear_source_registry, register_source
 from .dataset_test_utils import TestDataMaker, TestSource
 
 

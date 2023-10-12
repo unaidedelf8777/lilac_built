@@ -4,9 +4,12 @@
 </script>
 
 <script lang="ts">
-  import {addLabelsMutation, removeLabelsMutation} from '$lib/queries/datasetQueries';
+  import {
+    addLabelsMutation,
+    queryDatasetSchema,
+    removeLabelsMutation
+  } from '$lib/queries/datasetQueries';
   import {queryAuthInfo} from '$lib/queries/serverQueries';
-  import {getDatasetContext} from '$lib/stores/datasetStore';
   import {getDatasetViewContext} from '$lib/stores/datasetViewStore';
   import {getNotificationsContext} from '$lib/stores/notificationsStore';
   import {getSchemaLabels, type AddLabelsOptions, type RemoveLabelsOptions} from '$lilac';
@@ -33,8 +36,8 @@
 
   const notificationStore = getNotificationsContext();
 
-  const datasetStore = getDatasetContext();
   const datasetViewStore = getDatasetViewContext();
+  $: schema = queryDatasetSchema($datasetViewStore.namespace, $datasetViewStore.datasetName);
 
   $: namespace = $datasetViewStore.namespace;
   $: datasetName = $datasetViewStore.datasetName;
@@ -43,7 +46,7 @@
   $: canCreateLabelTypes = $authInfo.data?.access.dataset.create_label_type;
   $: canEditLabels = $authInfo.data?.access.dataset.edit_labels;
 
-  $: schemaLabels = $datasetStore.schema && getSchemaLabels($datasetStore.schema);
+  $: schemaLabels = $schema.data && getSchemaLabels($schema.data);
   $: newLabelAllowed = /^[A-Za-z0-9_-]+$/.test(comboBoxText) && canCreateLabelTypes;
   $: newLabelItem = {
     id: 'new-label',
@@ -56,9 +59,8 @@
       .map((l, i) => ({id: `label_${i}`, text: l})) || [];
   $: labelItems = [...(comboBoxText != '' && !remove ? [newLabelItem] : []), ...missingLabelItems];
 
-  $: addLabels = $datasetStore.schema != null ? addLabelsMutation($datasetStore.schema) : null;
-  $: removeLabels =
-    $datasetStore.schema != null ? removeLabelsMutation($datasetStore.schema) : null;
+  $: addLabels = $schema.data != null ? addLabelsMutation($schema.data) : null;
+  $: removeLabels = $schema.data != null ? removeLabelsMutation($schema.data) : null;
 
   $: inProgress = $addLabels?.isLoading || $removeLabels?.isLoading;
 
