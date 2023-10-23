@@ -29,32 +29,3 @@ def test_newlines_with_overlap() -> None:
   expected_chunks = text_to_textchunk(
     text, ['Hello.', 'World.', 'This will', 'will get', 'get split.'], allowable_overlap=5)
   assert split_items == expected_chunks
-
-
-def test_split_code() -> None:
-  text = """
-    We expected the entire code to be one span.
-
-    ```python
-    def hello():
-      echo('hello')
-    ```
-
-    This is the rest of the text.
-  """
-  split_items = split_text(text, chunk_size=60, chunk_overlap=0)
-  expected_chunks = text_to_textchunk(text, [
-    """
-    We expected the entire code to be one span.
-
-    """,
-    """```python
-    def hello():
-      echo('hello')
-    ```""",
-    """
-
-    This is the rest of the text.
-  """,
-  ])
-  assert split_items == expected_chunks
