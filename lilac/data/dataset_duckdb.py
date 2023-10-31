@@ -81,7 +81,14 @@ from ..signals.filter_mask import FilterMaskSignal
 from ..signals.semantic_similarity import SemanticSimilaritySignal
 from ..signals.substring_search import SubstringSignal
 from ..tasks import TaskStepId, progress
-from ..utils import DebugTimer, delete_file, get_dataset_output_dir, log, open_file
+from ..utils import (
+  DebugTimer,
+  delete_file,
+  get_dataset_output_dir,
+  get_lilac_cache_dir,
+  log,
+  open_file,
+)
 from . import dataset
 from .dataset import (
   BINARY_OPS,
@@ -1861,7 +1868,7 @@ class DatasetDuckDB(Dataset):
   @override
   def map(
     self,
-    map_fn: Callable[[Item], Item],
+    map_fn: Callable[[Item], Optional[Item]],
     output_path: Optional[Path] = None,
     input_paths: Optional[Sequence[Path]] = None,
     overwrite: bool = False,
@@ -1934,10 +1941,36 @@ class DatasetDuckDB(Dataset):
 
     con = self.con.cursor()
 
+    use_jsonl_cache = False
+    jsonl_cache_filepath: Optional[str] = None
+    if output_path:
+      jsonl_cache_filepath = _map_cache_filepath(self.project_dir, self.namespace,
+                                                 self.dataset_name, output_path)
+      if not overwrite and os.path.exists(jsonl_cache_filepath):
+        with open_file(jsonl_cache_filepath, 'r') as f:
+          # Read the first line of the file
+          first_line = f.readline()
+
+        # Don't use the cache if it's empty. This can happen if the first call to map() throws.
+        use_jsonl_cache = True if first_line.strip() else False
+
     def _rows() -> Iterable[Item]:
-      nonlocal select_queries
+      nonlocal select_queries, con
+
+      # Anti-join removes rows that are already in the cache.
+      anti_join = ''
+      if use_jsonl_cache:
+        anti_join = f"""
+          ANTI JOIN (
+            SELECT * FROM read_json_auto(
+              '{jsonl_cache_filepath}',
+              IGNORE_ERRORS=true,
+              format='newline_delimited')) as cache
+          ON t.{ROWID} = cache.{ROWID}
+        """
       result = con.execute(f"""
         SELECT {ROWID}, {', '.join(select_queries)} FROM t
+        {anti_join}
       """)
       while True:
         df_chunk = result.fetch_df_chunk()
@@ -1979,10 +2012,28 @@ class DatasetDuckDB(Dataset):
         estimated_len=manifest.num_items,
         step_description=f'Computing map over {input_paths}')
 
-    # Write the output rows to a temporary file to infer the schema from duckdb.
-    fs = fsspec.filesystem('memory')
-    tmp_json_filename = 'tmp.jsonl'
-    with fs.open(tmp_json_filename, 'w') as file:
+    if output_path:
+      # Use a local disk filesystem.
+      fs = fsspec.filesystem('file')
+      assert jsonl_cache_filepath is not None
+      jsonl_filepath = jsonl_cache_filepath
+
+      os.makedirs(os.path.dirname(jsonl_filepath), exist_ok=True)
+      # Overwrite the file if overwrite is True.
+      if overwrite:
+        open(jsonl_filepath, 'w').close()
+
+      duckdb_filepath = jsonl_filepath
+      write_mode = 'a'
+    else:
+      # Write the output rows to a temporary file to avoid writing to disk as these results are not
+      # cached.
+      fs = fsspec.filesystem('memory')
+      jsonl_filepath = 'tmp.jsonl'
+      duckdb_filepath = f'memory://{jsonl_filepath}'
+      write_mode = 'w'
+
+    with fs.open(jsonl_filepath, write_mode) as file:
       for item in outputs:
         json.dump(item, file)
         file.write('\n')
@@ -1993,7 +2044,7 @@ class DatasetDuckDB(Dataset):
     tmp_con.execute(f"""
       CREATE VIEW {jsonl_view_name} as (
         SELECT * FROM read_json_auto(
-          'memory://{tmp_json_filename}',
+          '{duckdb_filepath}',
           IGNORE_ERRORS=true,
           FORMAT='newline_delimited'
         )
@@ -2194,10 +2245,16 @@ def _signal_dir(enriched_path: PathTuple) -> str:
   return os.path.join(*path_without_wildcards)
 
 
-def _map_dir(enriched_path: PathTuple) -> str:
-  """Get the filename prefix for a signal parquet file."""
-  path_without_wildcards = (p for p in enriched_path if p != PATH_WILDCARD)
-  return os.path.join(*path_without_wildcards)
+def _map_cache_filepath(project_dir: Union[str, pathlib.Path], namespace: str, dataset_name: str,
+                        output_path: Path) -> str:
+  """Get the filepath for a map function's cache file."""
+  filename = '.'.join(normalize_path(output_path))
+  return os.path.join(
+    get_lilac_cache_dir(project_dir),
+    namespace,
+    dataset_name,
+    f'{filename}.jsonl',
+  )
 
 
 def split_column_name(column: str, split_name: str) -> str:
