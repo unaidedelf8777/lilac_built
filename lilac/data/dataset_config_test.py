@@ -45,24 +45,26 @@ class TestSignal2(TextSignal):
 
 class TestEmbedding(TextEmbeddingSignal):
   """A test embed function."""
+
   name: ClassVar[str] = 'test_embedding'
 
   @override
   def compute(self, data: Iterable[RichData]) -> Iterable[Item]:
     """Call the embedding function."""
     for example in data:
-      yield [lilac_embedding(0, len(example), np.array([1.]))]
+      yield [lilac_embedding(0, len(example), np.array([1.0]))]
 
 
 class TestEmbedding2(TextEmbeddingSignal):
   """A test embed function."""
+
   name: ClassVar[str] = 'test_embedding2'
 
   @override
   def compute(self, data: Iterable[RichData]) -> Iterable[Item]:
     """Call the embedding function."""
     for example in data:
-      yield [lilac_embedding(0, len(example), np.array([2.]))]
+      yield [lilac_embedding(0, len(example), np.array([2.0]))]
 
 
 @pytest.fixture(scope='module', autouse=True)
@@ -83,18 +85,15 @@ def setup_teardown() -> Iterable[None]:
 
 
 def test_config_compute_signal(make_test_data: TestDataMaker) -> None:
-  dataset = make_test_data([{
-    'text': 'hello',
-  }, {
-    'text': 'hello world'
-  }])
+  dataset = make_test_data([{'text': 'hello'}, {'text': 'hello world'}])
 
   assert dataset.config() == DatasetConfig(
     namespace='test_namespace',
     name='test_dataset',
     source=TestSource(),
     # 'text' is the longest path, so should be set as the default setting.
-    settings=DatasetSettings(ui=DatasetUISettings(media_paths=[('text',)])))
+    settings=DatasetSettings(ui=DatasetUISettings(media_paths=[('text',)])),
+  )
 
   dataset.compute_signal(TestSignal(), 'text')
 
@@ -102,11 +101,9 @@ def test_config_compute_signal(make_test_data: TestDataMaker) -> None:
     namespace='test_namespace',
     name='test_dataset',
     source=TestSource(),
-    signals=[SignalConfig(
-      path=('text',),
-      signal=TestSignal(),
-    )],
-    settings=DatasetSettings(ui=DatasetUISettings(media_paths=[('text',)])))
+    signals=[SignalConfig(path=('text',), signal=TestSignal())],
+    settings=DatasetSettings(ui=DatasetUISettings(media_paths=[('text',)])),
+  )
 
   # Computing the same signal again should not change the config.
   dataset.compute_signal(TestSignal(), 'text')
@@ -115,11 +112,9 @@ def test_config_compute_signal(make_test_data: TestDataMaker) -> None:
     namespace='test_namespace',
     name='test_dataset',
     source=TestSource(),
-    signals=[SignalConfig(
-      path=('text',),
-      signal=TestSignal(),
-    )],
-    settings=DatasetSettings(ui=DatasetUISettings(media_paths=[('text',)])))
+    signals=[SignalConfig(path=('text',), signal=TestSignal())],
+    settings=DatasetSettings(ui=DatasetUISettings(media_paths=[('text',)])),
+  )
 
   # Computing another signal should add another config.
   dataset.compute_signal(TestSignal2(), 'text')
@@ -129,16 +124,11 @@ def test_config_compute_signal(make_test_data: TestDataMaker) -> None:
     name='test_dataset',
     source=TestSource(),
     signals=[
-      SignalConfig(
-        path=('text',),
-        signal=TestSignal(),
-      ),
-      SignalConfig(
-        path=('text',),
-        signal=TestSignal2(),
-      )
+      SignalConfig(path=('text',), signal=TestSignal()),
+      SignalConfig(path=('text',), signal=TestSignal2()),
     ],
-    settings=DatasetSettings(ui=DatasetUISettings(media_paths=[('text',)])))
+    settings=DatasetSettings(ui=DatasetUISettings(media_paths=[('text',)])),
+  )
 
 
 def test_config_compute_embedding(make_test_data: TestDataMaker) -> None:
@@ -149,7 +139,8 @@ def test_config_compute_embedding(make_test_data: TestDataMaker) -> None:
     name='test_dataset',
     source=TestSource(),
     # 'text' is the longest path, so should be set as the default setting.
-    settings=DatasetSettings(ui=DatasetUISettings(media_paths=[('text',)])))
+    settings=DatasetSettings(ui=DatasetUISettings(media_paths=[('text',)])),
+  )
 
   dataset.compute_embedding('test_embedding', 'text')
 
@@ -157,11 +148,9 @@ def test_config_compute_embedding(make_test_data: TestDataMaker) -> None:
     namespace='test_namespace',
     name='test_dataset',
     source=TestSource(),
-    embeddings=[EmbeddingConfig(
-      path=('text',),
-      embedding='test_embedding',
-    )],
-    settings=DatasetSettings(ui=DatasetUISettings(media_paths=[('text',)])))
+    embeddings=[EmbeddingConfig(path=('text',), embedding='test_embedding')],
+    settings=DatasetSettings(ui=DatasetUISettings(media_paths=[('text',)])),
+  )
 
   # Computing the same embedding again should not change the config.
   dataset.compute_embedding('test_embedding', 'text')
@@ -170,11 +159,9 @@ def test_config_compute_embedding(make_test_data: TestDataMaker) -> None:
     namespace='test_namespace',
     name='test_dataset',
     source=TestSource(),
-    embeddings=[EmbeddingConfig(
-      path=('text',),
-      embedding='test_embedding',
-    )],
-    settings=DatasetSettings(ui=DatasetUISettings(media_paths=[('text',)])))
+    embeddings=[EmbeddingConfig(path=('text',), embedding='test_embedding')],
+    settings=DatasetSettings(ui=DatasetUISettings(media_paths=[('text',)])),
+  )
 
   # Computing another embedding should add another config.
   dataset.compute_embedding('test_embedding2', 'text')
@@ -184,16 +171,11 @@ def test_config_compute_embedding(make_test_data: TestDataMaker) -> None:
     name='test_dataset',
     source=TestSource(),
     embeddings=[
-      EmbeddingConfig(
-        path=('text',),
-        embedding='test_embedding',
-      ),
-      EmbeddingConfig(
-        path=('text',),
-        embedding='test_embedding2',
-      )
+      EmbeddingConfig(path=('text',), embedding='test_embedding'),
+      EmbeddingConfig(path=('text',), embedding='test_embedding2'),
     ],
-    settings=DatasetSettings(ui=DatasetUISettings(media_paths=[('text',)])))
+    settings=DatasetSettings(ui=DatasetUISettings(media_paths=[('text',)])),
+  )
 
 
 def test_settings(make_test_data: TestDataMaker) -> None:
@@ -202,10 +184,8 @@ def test_settings(make_test_data: TestDataMaker) -> None:
 
   # Settings is reflected in the config and the public settings method.
   assert dataset.config() == DatasetConfig(
-    namespace='test_namespace',
-    name='test_dataset',
-    source=TestSource(),
-    settings=expected_settings)
+    namespace='test_namespace', name='test_dataset', source=TestSource(), settings=expected_settings
+  )
 
   assert dataset.settings() == expected_settings
 
@@ -215,7 +195,5 @@ def test_settings(make_test_data: TestDataMaker) -> None:
   expected_settings = DatasetSettings(ui=DatasetUISettings(media_paths=[('str',)]))
   assert dataset.settings() == expected_settings
   assert dataset.config() == DatasetConfig(
-    namespace='test_namespace',
-    name='test_dataset',
-    source=TestSource(),
-    settings=expected_settings)
+    namespace='test_namespace', name='test_dataset', source=TestSource(), settings=expected_settings
+  )
