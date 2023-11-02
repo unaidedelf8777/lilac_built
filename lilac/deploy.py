@@ -75,7 +75,7 @@ def deploy_project(
       '--project_dir or the environment variable `LILAC_PROJECT_DIR` must be defined.'
     )
 
-  hf_api = HfApi()
+  hf_api = HfApi(token=hf_token)
 
   operations: list[Union[CommitOperationDelete, CommitOperationAdd]] = deploy_project_operations(
     api=hf_api,
@@ -90,12 +90,14 @@ def deploy_project(
     create_space=create_space,
     load_on_space=load_on_space,
     hf_space_storage=hf_space_storage,
-    hf_token=hf_token,
   )
 
   # Atomically commit all the operations so we don't kick the server multiple times.
   hf_api.create_commit(
-    repo_id=hf_space, repo_type='space', operations=operations, commit_message='Push to HF space'
+    repo_id=hf_space,
+    repo_type='space',
+    operations=operations,
+    commit_message='Push to HF space',
   )
 
   link = f'https://huggingface.co/spaces/{hf_space}'
@@ -129,15 +131,6 @@ def deploy_project_operations(
     ) from e
 
   hf_api: HfApi = api
-
-  if not make_datasets_public and not load_on_space:
-    hf_token = env('HF_ACCESS_TOKEN', hf_token)
-    if not hf_token:
-      raise ValueError(
-        'When datasets are made private, please set the `HF_ACCESS_TOKEN` environment flag or '
-        'pass --hf_token. The token is required so that the space can sync datasets when it '
-        'boots up.'
-      )
 
   operations: list[Union[CommitOperationDelete, CommitOperationAdd]] = []
 
@@ -471,7 +464,10 @@ def _upload_datasets(
     )
 
     hf_api.create_repo(
-      dataset_repo_id, repo_type='dataset', private=not make_datasets_public, exist_ok=True
+      dataset_repo_id,
+      repo_type='dataset',
+      private=not make_datasets_public,
+      exist_ok=True,
     )
     dataset_output_dir = get_dataset_output_dir(project_dir, namespace, name)
     hf_api.upload_folder(
@@ -505,7 +501,10 @@ def _upload_datasets(
       f'```{dataset_config_yaml}```\n\n'
     ).encode()
     hf_api.upload_file(
-      path_or_fileobj=readme, path_in_repo='README.md', repo_id=dataset_repo_id, repo_type='dataset'
+      path_or_fileobj=readme,
+      path_in_repo='README.md',
+      repo_id=dataset_repo_id,
+      repo_type='dataset',
     )
 
     lilac_hf_datasets.append(dataset_repo_id)
