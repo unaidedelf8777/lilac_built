@@ -15,6 +15,10 @@ export LILAC_TEST=True
 
 # -vv enables verbose outputs.
 # --capture=tee-sys enables printing for passing tests.
+
+# To run tests multiple times, pass to pytest:
+# --count=10 to run each test 10 times.
+
 # We propagate the first argument as a test path, which can be:
 # 1) `lilac/data/dataset_test.py` to run a single file.
 # 2) `lilac/data/dataset_test.py::SelectRowsSuite` to run a test suite.
