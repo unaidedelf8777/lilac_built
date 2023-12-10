@@ -11,6 +11,8 @@
    */
   import {getSettingsContext} from '$lib/stores/settingsStore';
   import {getComputedEmbeddings, getDisplayPath, getSpanValuePaths} from '$lib/view_utils';
+  import SvelteMarkdown from 'svelte-markdown';
+
   import {
     L,
     PATH_WILDCARD,
@@ -25,11 +27,19 @@
     type Path
   } from '$lilac';
   import {SkeletonText} from 'carbon-components-svelte';
-  import {ChevronDown, ChevronUp, DirectionFork, Search, Undo} from 'carbon-icons-svelte';
+  import {
+    CatalogPublish,
+    ChevronDown,
+    ChevronUp,
+    DataViewAlt,
+    DirectionFork,
+    Search,
+    Undo
+  } from 'carbon-icons-svelte';
   import ButtonDropdown from '../ButtonDropdown.svelte';
   import {hoverTooltip} from '../common/HoverTooltip';
   import ItemMediaDiff from './ItemMediaDiff.svelte';
-  import StringSpanHighlight from './StringSpanHighlight.svelte';
+  import ItemMediaTextContent from './ItemMediaTextContent.svelte';
 
   export let mediaPath: Path;
   export let row: LilacValueNode | undefined | null = undefined;
@@ -72,6 +82,8 @@
   // The child component will communicate this back upwards to this component.
   let textIsOverBudget = false;
   let userExpanded = false;
+  // True when the user has switched to preview mode (markdown rendering).
+  let userPreview: boolean | undefined = undefined;
 
   const datasetViewStore = getDatasetViewContext();
   const appSettings = getSettingsContext();
@@ -184,19 +196,23 @@
   function removeComparison() {
     datasetViewStore.removeCompareColumn(mediaPath);
   }
-  $: markdown = $settings.data?.ui?.markdown_paths?.find(p => pathIsEqual(p, mediaPath)) != null;
+  $: datasetSettingsMarkdown =
+    $settings.data?.ui?.markdown_paths?.find(p => pathIsEqual(p, mediaPath)) != null;
+  $: markdown = userPreview !== undefined ? userPreview : datasetSettingsMarkdown;
 </script>
 
-<div class="flex w-full gap-x-4 p-2">
+<div class="flex w-full flex-row gap-x-4 p-2">
   {#if isLeaf}
-    <div class="relative mr-4 flex w-28 flex-none font-mono font-medium text-neutral-500 md:w-44">
+    <div
+      class="relative mr-4 flex w-32 shrink-0 flex-row font-mono font-medium text-neutral-500 md:w-44"
+    >
       <div class="sticky top-0 flex w-full flex-col gap-y-2 self-start">
         {#if displayPath != '' && titleValue == null}
           <div title={displayPath} class="mx-2 mt-2 w-full flex-initial truncate">
             {displayPath}
           </div>
         {/if}
-        <div class="flex flex-row">
+        <div class="flex flex-row gap-x-1">
           <div
             use:hoverTooltip={{
               text: noEmbeddings ? '"More like this" requires an embedding index' : undefined
@@ -210,6 +226,13 @@
               ><Search size={16} />
             </button>
           </div>
+          <button
+            disabled={colCompareState != null}
+            class:opacity-50={colCompareState != null}
+            on:click={() => (userPreview = !markdown)}
+            use:hoverTooltip={{text: !markdown ? 'Preview markdown' : 'Back to text'}}
+            >{#if markdown}<CatalogPublish size={16} />{:else}<DataViewAlt size={16} />{/if}
+          </button>
           {#if !colCompareState}
             <ButtonDropdown
               disabled={compareItems.length === 0}
@@ -226,6 +249,7 @@
               ><Undo size={16} />
             </button>
           {/if}
+
           <button
             disabled={!textIsOverBudget}
             class:opacity-50={!textIsOverBudget}
@@ -236,7 +260,7 @@
         </div>
       </div>
     </div>
-    <div class="w-full grow-0 font-normal">
+    <div class="flex grow flex-col font-normal">
       {#if titleValue != null}
         <div
           class="-m-2 mb-1 rounded bg-gray-100 p-1 px-2 text-xs font-bold uppercase text-gray-700"
@@ -244,22 +268,28 @@
           {titleValue}
         </div>
       {/if}
-      <div class="overflow-x-auto pt-1">
+
+      <div class="grow pt-1">
         {#if row != null}
           {#if colCompareState == null}
-            <StringSpanHighlight
+            <ItemMediaTextContent
+              hidden={markdown}
               text={formatValue(value)}
               {row}
               path={rootPath}
               {field}
-              {markdown}
               isExpanded={userExpanded}
               spanPaths={spanValuePaths.spanPaths}
-              valuePaths={spanValuePaths.valuePaths}
+              spanValueInfos={spanValuePaths.spanValueInfos}
               {datasetViewStore}
               embeddings={computedEmbeddings}
               bind:textIsOverBudget
             />
+            <div class="markdown w-full" class:hidden={!markdown}>
+              <div class="markdown w-fit">
+                <SvelteMarkdown source={formatValue(value)} />
+              </div>
+            </div>
           {:else}
             <ItemMediaDiff
               {row}
