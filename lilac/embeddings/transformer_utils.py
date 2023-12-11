@@ -42,4 +42,14 @@ def get_model(model_name: str) -> 'SentenceTransformer':
   elif not torch.backends.mps.is_built():
     log('MPS not available because the current PyTorch install was not built with MPS enabled.')
 
+  try:
+    import torch.cuda as cu
+    if cu.is_available():
+      preferred_device = 'cuda'
+    else:
+      log("`pytorch.cuda.is_available()` returned False. embeddings will be CPU bound.")
+  except ImportError:
+    log('pytorch.cuda not available. embeddings will be CPU bound.')
+  
+
   return _get_model(model_name, preferred_device)
