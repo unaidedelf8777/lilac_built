@@ -29,10 +29,10 @@ def main(api_json_from_server: bool) -> None:
   # Generate the web client.
   run(
     f"""
-    pushd web/lib/ > /dev/null && \
+    cd web/lib/ && \
     npx openapi --input {openapi_input} --output {output} --useUnionTypes && \
-    popd > /dev/null
-  """
+    cd -
+    """
   )
 
   print(f'[make_fastapi_client] Web client written to {output}')
