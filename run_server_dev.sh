@@ -11,7 +11,7 @@ pid[2]=$!
 
 # Run the FastAPI server.
 export LILAC_PROJECT_DIR='/content/drive/MyDrive/lilac/slimorca_dedup/v1/'
-poetry run uvicorn lilac.server:app --reload --port 5432 --host 0.0.0.0 \
+poetry run uvicorn lilac.server:app --reload --port 5432 --host 127.0.0.1 \
   --reload-dir lilac &
 pid[1]=$!
 
