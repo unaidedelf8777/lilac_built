@@ -18,6 +18,14 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
 
+"""set multiprocessing start methd to `spawn`. this is required for cuda to work."""
+try:
+  import torch.multiprocessing as mp
+  mp.set_start_method('spawn', force=True)
+except Exception as e:
+  # we wont use it then i guess
+  pass
+  
 from . import (
   router_concept,
   router_data_loader,
